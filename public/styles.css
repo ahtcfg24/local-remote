@@ -169,6 +169,38 @@ canvas:focus {
   color: var(--muted);
 }
 
+.remote-cursor {
+  position: absolute;
+  z-index: 3;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+  transform: translate(-3px, -3px);
+  filter: drop-shadow(0 2px 4px rgb(0 0 0 / 70%));
+}
+
+.remote-cursor::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 16px solid #fff;
+  border-right: 10px solid transparent;
+}
+
+.remote-cursor::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 0;
+  height: 0;
+  border-top: 10px solid #111315;
+  border-right: 6px solid transparent;
+}
+
 .fullscreen-exit {
   display: none;
   position: absolute;
@@ -393,6 +425,10 @@ button.secondary.active {
   background: var(--panel-2);
 }
 
+.mobile-dock {
+  display: none;
+}
+
 .log-box {
   min-height: 0;
   border: 1px solid var(--line);
@@ -433,6 +469,7 @@ pre {
   .control-panel {
     border-left: 0;
     border-top: 1px solid var(--line);
+    padding-bottom: calc(86px + env(safe-area-inset-bottom));
   }
 
   canvas {
@@ -440,5 +477,52 @@ pre {
     height: auto;
     aspect-ratio: var(--screen-aspect, 16 / 9);
     max-height: none;
+  }
+
+  .panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .panel-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .fullscreen-tools {
+    right: 10px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    left: 10px;
+    justify-content: center;
+    overflow-x: auto;
+  }
+
+  .fullscreen-exit {
+    top: 10px;
+    right: 10px;
+  }
+
+  .mobile-dock {
+    position: fixed;
+    z-index: 20;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    left: 10px;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid rgb(255 255 255 / 14%);
+    border-radius: 10px;
+    background: rgb(16 19 22 / 90%);
+    backdrop-filter: blur(10px);
+  }
+
+  .mobile-dock button {
+    min-height: 40px;
+    padding: 0 6px;
+    border-color: rgb(255 255 255 / 16%);
+    background: var(--panel-2);
+    font-size: 12px;
   }
 }

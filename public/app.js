@@ -22,6 +22,8 @@ const screenWrap = document.querySelector('.screen-wrap');
 const appShell = document.querySelector('.app-shell');
 const panMode = document.getElementById('panMode');
 const zoomReadouts = document.querySelectorAll('.zoom-readout');
+const remoteCursor = document.getElementById('remoteCursor');
+const mobileModeBtn = document.getElementById('mobileModeBtn');
 
 let ws = null;
 let screen = { width: canvas.width, height: canvas.height };
@@ -42,11 +44,20 @@ let view = {
 };
 let panPointerId = null;
 let pinchState = null;
+let touchMode = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900 ? 'trackpad' : 'direct';
+let trackpadPointerId = null;
+let trackpadLastPoint = null;
+let trackpadTravel = 0;
+let touchDownAt = 0;
+let tapCount = 0;
+let tapTimer = null;
+let pointerInitialized = false;
 const activePointers = new Map();
 
 const pointerMoveInterval = window.matchMedia('(pointer: coarse)').matches ? 70 : 35;
 const minZoom = 0.5;
 const maxZoom = 4;
+const trackpadSensitivity = 1.45;
 
 function log(message) {
   const time = new Date().toLocaleTimeString();
@@ -88,6 +99,7 @@ function applyViewTransform() {
   document.querySelectorAll('[data-view-action="pan"]').forEach((button) => {
     button.classList.toggle('active', Boolean(panMode?.checked));
   });
+  positionRemoteCursor();
 }
 
 function setZoom(nextZoom, origin = null) {
@@ -133,6 +145,46 @@ function rotatePointForScreen(localX, localY, rect) {
   };
 }
 
+function screenPointToClient(point) {
+  const rect = canvas.getBoundingClientRect();
+  const normalizedRotation = ((view.rotation % 360) + 360) % 360;
+  let localX;
+  let localY;
+  if (normalizedRotation === 90) {
+    localX = (1 - point.y / screen.height) * rect.width;
+    localY = (point.x / screen.width) * rect.height;
+  } else if (normalizedRotation === 270) {
+    localX = (point.y / screen.height) * rect.width;
+    localY = (1 - point.x / screen.width) * rect.height;
+  } else if (normalizedRotation === 180) {
+    localX = (1 - point.x / screen.width) * rect.width;
+    localY = (1 - point.y / screen.height) * rect.height;
+  } else {
+    localX = (point.x / screen.width) * rect.width;
+    localY = (point.y / screen.height) * rect.height;
+  }
+  return { x: rect.left + localX, y: rect.top + localY };
+}
+
+function positionRemoteCursor() {
+  if (!remoteCursor) return;
+  const wrapRect = screenWrap.getBoundingClientRect();
+  const client = screenPointToClient(lastPointer);
+  remoteCursor.style.left = `${client.x - wrapRect.left}px`;
+  remoteCursor.style.top = `${client.y - wrapRect.top}px`;
+  remoteCursor.hidden = touchMode !== 'trackpad';
+}
+
+function setTouchMode(mode, announce = true) {
+  touchMode = mode;
+  document.querySelectorAll('[data-touch-mode]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.touchMode === touchMode);
+  });
+  if (mobileModeBtn) mobileModeBtn.textContent = touchMode === 'trackpad' ? '触控板' : '直触';
+  positionRemoteCursor();
+  if (announce) log(touchMode === 'trackpad' ? '触控板模式已开启' : '直接触摸模式已开启');
+}
+
 function mouseButtonLabel(button) {
   return button === 'left' ? '左键' : button === 'right' ? '右键' : '中键';
 }
@@ -175,16 +227,22 @@ function canvasPoint(event) {
 function updatePointer(point) {
   lastPointer = point;
   pointerLabel.textContent = `指针：${Math.round(point.x)}, ${Math.round(point.y)} · ${mouseButtonLabel(selectedMouseButton)}`;
+  positionRemoteCursor();
 }
 
 function updateStatus(payload) {
   if (payload.screen?.width && payload.screen?.height) {
     screen = payload.screen;
+    if (!pointerInitialized) {
+      lastPointer = { x: screen.width / 2, y: screen.height / 2 };
+      pointerInitialized = true;
+    }
     canvas.width = screen.width;
     canvas.height = screen.height;
     canvas.style.setProperty('--screen-aspect', `${screen.width} / ${screen.height}`);
     canvas.style.setProperty('--screen-ratio', screen.width / screen.height);
     screenLabel.textContent = `${screen.width} × ${screen.height} · ${payload.fps || '--'} FPS`;
+    positionRemoteCursor();
   }
 
   const screenRecording = payload.permissions?.screenRecording;
@@ -299,6 +357,22 @@ canvas.addEventListener('pointermove', (event) => {
     return;
   }
 
+  if (event.pointerType === 'touch' && touchMode === 'trackpad' && trackpadPointerId === event.pointerId && trackpadLastPoint) {
+    const dx = (event.clientX - trackpadLastPoint.x) * trackpadSensitivity;
+    const dy = (event.clientY - trackpadLastPoint.y) * trackpadSensitivity;
+    trackpadLastPoint = pointerSnapshot(event);
+    trackpadTravel += Math.abs(dx) + Math.abs(dy);
+    if (Math.abs(dx) + Math.abs(dy) > 0.5) {
+      updatePointer({
+        x: clamp(lastPointer.x + dx, 0, screen.width - 1),
+        y: clamp(lastPointer.y + dy, 0, screen.height - 1),
+      });
+      sendPointer(remotePointerDown ? 'pointer_drag' : 'pointer_move', lastPointer, activeMouseButton);
+    }
+    event.preventDefault();
+    return;
+  }
+
   const now = performance.now();
   if (now - lastMoveAt < pointerMoveInterval) return;
   lastMoveAt = now;
@@ -315,8 +389,6 @@ canvas.addEventListener('pointerdown', (event) => {
   canvas.setPointerCapture?.(event.pointerId);
   canvas.focus();
   activePointers.set(event.pointerId, pointerSnapshot(event));
-  const point = canvasPoint(event);
-  updatePointer(point);
   clearTimeout(longPressTimer);
   longPressFired = false;
 
@@ -331,6 +403,23 @@ canvas.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     return;
   }
+
+  if (event.pointerType === 'touch' && touchMode === 'trackpad' && !dragLocked) {
+    trackpadPointerId = event.pointerId;
+    trackpadLastPoint = pointerSnapshot(event);
+    trackpadTravel = 0;
+    touchDownAt = performance.now();
+    longPressTimer = setTimeout(() => {
+      longPressFired = true;
+      sendPointer('click', lastPointer, 'right');
+      log('长按已发送右键单击');
+    }, 650);
+    event.preventDefault();
+    return;
+  }
+
+  const point = canvasPoint(event);
+  updatePointer(point);
 
   if (event.pointerType === 'touch' && !dragLocked) {
     longPressTimer = setTimeout(() => {
@@ -362,6 +451,31 @@ canvas.addEventListener('pointerup', (event) => {
 
   if (panPointerId === event.pointerId) {
     panPointerId = null;
+    event.preventDefault();
+    return;
+  }
+
+  if (event.pointerType === 'touch' && touchMode === 'trackpad' && trackpadPointerId === event.pointerId) {
+    clearTimeout(longPressTimer);
+    trackpadPointerId = null;
+    trackpadLastPoint = null;
+    const isTap = performance.now() - touchDownAt < 420 && trackpadTravel < 12;
+    if (isTap && !longPressFired) {
+      tapCount += 1;
+      clearTimeout(tapTimer);
+      tapTimer = setTimeout(() => {
+        if (tapCount >= 2) {
+          sendPointer('double_click', lastPointer, selectedMouseButton);
+          log('触控板双击');
+        } else {
+          sendPointer('click', lastPointer, selectedMouseButton);
+          log('触控板单击');
+        }
+        tapCount = 0;
+      }, 220);
+    }
+    longPressFired = false;
+    trackpadTravel = 0;
     event.preventDefault();
     return;
   }
@@ -427,6 +541,13 @@ document.querySelectorAll('[data-mouse-button]').forEach((button) => {
   });
 });
 
+document.querySelectorAll('[data-touch-mode]').forEach((button) => {
+  button.addEventListener('click', () => {
+    setTouchMode(button.dataset.touchMode);
+    canvas.focus();
+  });
+});
+
 clickBtn.addEventListener('click', () => {
   sendPointer('click');
   canvas.focus();
@@ -488,6 +609,22 @@ document.querySelectorAll('[data-view-action]').forEach((button) => {
       panMode.checked = !panMode.checked;
       log(panMode.checked ? '平移视图已开启' : '平移视图已关闭');
     }
+    canvas.focus();
+  });
+});
+
+document.querySelectorAll('[data-mobile-action]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const action = button.dataset.mobileAction;
+    if (action === 'mode') setTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad');
+    if (action === 'left-click') sendPointer('click', lastPointer, 'left');
+    if (action === 'right-click') sendPointer('click', lastPointer, 'right');
+    if (action === 'keyboard') {
+      textInput.focus();
+      return;
+    }
+    if (action === 'zoom-in') setZoom(view.zoom * 1.18);
+    if (action === 'zoom-out') setZoom(view.zoom / 1.18);
     canvas.focus();
   });
 });
@@ -607,5 +744,6 @@ window.addEventListener('beforeunload', () => {
   ws?.close();
 });
 
+setTouchMode(touchMode, false);
 applyViewTransform();
 connect();
