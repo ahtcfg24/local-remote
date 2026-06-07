@@ -24,6 +24,7 @@
       <section class="workspace">
         <div class="screen-wrap">
           <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
+          <div id="remoteCursor" class="remote-cursor" aria-hidden="true"></div>
           <div id="emptyState" class="empty-state">等待屏幕帧...</div>
           <div class="fullscreen-tools" aria-label="全屏视图工具">
             <button data-view-action="landscape" type="button">横屏</button>
@@ -50,6 +51,10 @@
 
           <div class="tool-section">
             <div class="section-title">视图</div>
+            <div class="segmented" role="group" aria-label="触控模式">
+              <button data-touch-mode="trackpad" type="button" class="active">触控板</button>
+              <button data-touch-mode="direct" type="button">直接触摸</button>
+            </div>
             <div class="view-grid">
               <button data-view-action="landscape" type="button" class="secondary">横屏</button>
               <button data-view-action="reset" type="button" class="secondary">重置</button>
@@ -114,6 +119,14 @@
           </div>
         </aside>
       </section>
+      <nav class="mobile-dock" aria-label="移动端快捷操作">
+        <button id="mobileModeBtn" data-mobile-action="mode" type="button">触控板</button>
+        <button data-mobile-action="left-click" type="button">左击</button>
+        <button data-mobile-action="right-click" type="button">右击</button>
+        <button data-mobile-action="keyboard" type="button">键盘</button>
+        <button data-mobile-action="zoom-out" type="button">-</button>
+        <button data-mobile-action="zoom-in" type="button">+</button>
+      </nav>
     </main>
 
     <script src="/public/app.js" type="module"></script>
