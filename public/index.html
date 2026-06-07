@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>局域网远程控制 Demo</title>
+    <link rel="stylesheet" href="/public/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>局域网远程控制 Demo</h1>
+          <p>仅适合可信局域网；无 TLS，不要暴露到公网。</p>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <span id="connectionDot" class="dot"></span>
+          <span id="connectionLabel">连接中</span>
+          <span id="screenLabel">--</span>
+          <span id="permissionLabel">权限检测中</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <div class="screen-wrap">
+          <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
+          <div id="emptyState" class="empty-state">等待屏幕帧...</div>
+          <div class="fullscreen-tools" aria-label="全屏视图工具">
+            <button data-view-action="landscape" type="button">横屏</button>
+            <button data-view-action="zoom-out" type="button">-</button>
+            <span class="zoom-readout">100%</span>
+            <button data-view-action="zoom-in" type="button">+</button>
+            <button data-view-action="reset" type="button">重置</button>
+            <button data-view-action="pan" type="button">平移</button>
+          </div>
+          <button id="fullscreenExitBtn" type="button" class="fullscreen-exit">退出全屏</button>
+        </div>
+
+        <aside class="control-panel">
+          <div class="panel-head">
+            <label class="toggle-row">
+              <input id="controlEnabled" type="checkbox" checked />
+              <span>启用远程控制</span>
+            </label>
+            <div class="panel-actions">
+              <button id="copyLinkBtn" type="button" class="secondary">复制地址</button>
+              <button id="fullscreenBtn" type="button" class="secondary">全屏</button>
+            </div>
+          </div>
+
+          <div class="tool-section">
+            <div class="section-title">视图</div>
+            <div class="view-grid">
+              <button data-view-action="landscape" type="button" class="secondary">横屏</button>
+              <button data-view-action="reset" type="button" class="secondary">重置</button>
+              <button data-view-action="zoom-out" type="button" class="secondary">缩小</button>
+              <div class="zoom-readout zoom-card">100%</div>
+              <button data-view-action="zoom-in" type="button" class="secondary">放大</button>
+            </div>
+            <label class="toggle-row drag-toggle">
+              <input id="panMode" type="checkbox" />
+              <span>平移视图</span>
+            </label>
+          </div>
+
+          <div class="tool-section">
+            <div class="section-title">鼠标</div>
+            <div class="segmented" role="group" aria-label="鼠标按键">
+              <button data-mouse-button="left" type="button" class="active">左键</button>
+              <button data-mouse-button="right" type="button">右键</button>
+              <button data-mouse-button="middle" type="button">中键</button>
+            </div>
+            <div class="button-row">
+              <button id="clickBtn" type="button">单击</button>
+              <button id="doubleClickBtn" type="button" class="secondary">双击</button>
+            </div>
+            <label class="toggle-row drag-toggle">
+              <input id="dragLock" type="checkbox" />
+              <span>拖拽锁定</span>
+            </label>
+            <div class="scroll-pad" aria-label="滚动">
+              <button data-scroll="up" type="button">上滚</button>
+              <button data-scroll="left" type="button">左滚</button>
+              <button data-scroll="right" type="button">右滚</button>
+              <button data-scroll="down" type="button">下滚</button>
+            </div>
+            <div id="pointerLabel" class="hint-line">指针：--</div>
+          </div>
+
+          <label class="field">
+            <span>发送文本到本机前台应用</span>
+            <textarea id="textInput" rows="5" placeholder="输入后点击发送"></textarea>
+          </label>
+
+          <div class="button-row">
+            <button id="sendText" type="button">发送文本</button>
+            <button id="clearText" type="button" class="secondary">清空</button>
+          </div>
+
+          <div class="key-grid" aria-label="快捷键">
+            <button data-key="Escape" type="button">Esc</button>
+            <button data-key="Backspace" type="button">⌫</button>
+            <button data-key="Enter" type="button">Enter</button>
+            <button data-key="Tab" type="button">Tab</button>
+            <button data-key="ArrowUp" type="button">↑</button>
+            <button data-key="ArrowLeft" type="button">←</button>
+            <button data-key="ArrowDown" type="button">↓</button>
+            <button data-key="ArrowRight" type="button">→</button>
+          </div>
+
+          <div class="log-box">
+            <div class="log-title">状态</div>
+            <pre id="logOutput">准备连接...</pre>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/public/app.js" type="module"></script>
+  </body>
+</html>

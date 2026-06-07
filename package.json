@@ -1,0 +1,18 @@
+{
+  "name": "local-remote-control-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LAN-only macOS remote screen view and control demo.",
+  "type": "module",
+  "scripts": {
+    "build:native": "mkdir -p .build && swiftc native/control.swift -o .build/control",
+    "start": "npm run build:native && node server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "ws": "^8.21.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
