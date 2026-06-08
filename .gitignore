@@ -1,4 +1,5 @@
 node_modules/
 .build/
+.run/
 .DS_Store
 *.log

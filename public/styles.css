@@ -254,14 +254,20 @@ canvas:focus {
 
 .panel-head {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: space-between;
+  flex-direction: column;
   gap: 10px;
 }
 
 .panel-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+}
+
+.panel-actions button {
+  padding: 0 10px;
 }
 
 .toggle-row {
@@ -402,6 +408,11 @@ button:hover {
   filter: brightness(1.08);
 }
 
+button:disabled {
+  cursor: progress;
+  opacity: 0.68;
+}
+
 button.secondary {
   border-color: var(--line);
   background: var(--panel-2);
@@ -442,6 +453,99 @@ button.secondary.active {
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgb(0 0 0 / 58%);
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  width: min(620px, 100%);
+  max-height: min(680px, calc(100vh - 36px));
+  display: grid;
+  gap: 16px;
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.modal-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.icon-button {
+  width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-color: var(--line);
+  background: var(--panel-2);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.auth-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101316;
+}
+
+.auth-step strong,
+.auth-step span {
+  display: block;
+}
+
+.auth-step span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.auth-actions,
+.modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
 }
 
 pre {
@@ -485,6 +589,16 @@ pre {
   }
 
   .panel-actions {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .auth-step {
+    grid-template-columns: 1fr;
+  }
+
+  .auth-actions,
+  .modal-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
   }

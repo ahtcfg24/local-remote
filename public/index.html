@@ -44,6 +44,7 @@
               <span>启用远程控制</span>
             </label>
             <div class="panel-actions">
+              <button id="authGuideBtn" type="button" class="secondary">授权引导</button>
               <button id="copyLinkBtn" type="button" class="secondary">复制地址</button>
               <button id="fullscreenBtn" type="button" class="secondary">全屏</button>
             </div>
@@ -127,6 +128,46 @@
         <button data-mobile-action="zoom-out" type="button">-</button>
         <button data-mobile-action="zoom-in" type="button">+</button>
       </nav>
+
+      <div id="authModal" class="modal-backdrop" hidden>
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="authModalTitle">macOS 授权引导</h2>
+              <p id="authModalStatus">正在检测权限...</p>
+            </div>
+            <button id="authModalClose" type="button" class="icon-button" aria-label="关闭">×</button>
+          </header>
+
+          <div class="auth-steps">
+            <div class="auth-step">
+              <div>
+                <strong>屏幕录制</strong>
+                <span>把弹窗里的 Node 拖到“屏幕录制”列表并打开开关。</span>
+              </div>
+              <div class="auth-actions">
+                <button data-auth-action="open_screen_settings" type="button" class="secondary">打开设置</button>
+                <button data-auth-action="trigger_screen_recording" type="button">触发请求</button>
+              </div>
+            </div>
+            <div class="auth-step">
+              <div>
+                <strong>辅助功能</strong>
+                <span>把弹窗里的 control 拖到“辅助功能”列表并打开开关。</span>
+              </div>
+              <div class="auth-actions">
+                <button data-auth-action="open_accessibility_settings" type="button" class="secondary">打开设置</button>
+                <button data-auth-action="trigger_accessibility_prompt" type="button">触发请求</button>
+              </div>
+            </div>
+          </div>
+
+          <footer class="modal-actions">
+            <button data-auth-action="open_guide" type="button">打开拖拽弹窗</button>
+            <button data-auth-action="recheck" type="button" class="secondary">重新检测</button>
+          </footer>
+        </section>
+      </div>
     </main>
 
     <script src="/public/app.js" type="module"></script>

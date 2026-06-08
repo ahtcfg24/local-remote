@@ -14,6 +14,10 @@ const clearText = document.getElementById('clearText');
 const fullscreenBtn = document.getElementById('fullscreenBtn');
 const fullscreenExitBtn = document.getElementById('fullscreenExitBtn');
 const copyLinkBtn = document.getElementById('copyLinkBtn');
+const authGuideBtn = document.getElementById('authGuideBtn');
+const authModal = document.getElementById('authModal');
+const authModalClose = document.getElementById('authModalClose');
+const authModalStatus = document.getElementById('authModalStatus');
 const clickBtn = document.getElementById('clickBtn');
 const doubleClickBtn = document.getElementById('doubleClickBtn');
 const dragLock = document.getElementById('dragLock');
@@ -58,6 +62,15 @@ const pointerMoveInterval = window.matchMedia('(pointer: coarse)').matches ? 70 
 const minZoom = 0.5;
 const maxZoom = 4;
 const trackpadSensitivity = 1.45;
+
+function permissionText(payload) {
+  const screenRecording = payload.permissions?.screenRecording;
+  const accessibility = payload.permissions?.accessibility;
+  return [
+    screenRecording === 'ok' ? '录屏已就绪' : '录屏待授权',
+    accessibility === 'ok' ? '控制已就绪' : '辅助功能待授权',
+  ].join(' · ');
+}
 
 function log(message) {
   const time = new Date().toLocaleTimeString();
@@ -247,13 +260,47 @@ function updateStatus(payload) {
 
   const screenRecording = payload.permissions?.screenRecording;
   const accessibility = payload.permissions?.accessibility;
-  const permissionParts = [];
-  permissionParts.push(screenRecording === 'ok' ? '录屏已就绪' : '录屏待授权');
-  permissionParts.push(accessibility === 'ok' ? '控制已就绪' : '辅助功能待授权');
-  permissionLabel.textContent = permissionParts.join(' · ');
+  permissionLabel.textContent = permissionText(payload);
 
   const errors = [payload.errors?.frame, payload.errors?.control].filter(Boolean);
   if (errors.length) log(errors.join('\n'));
+}
+
+async function runAuthAction(action) {
+  const response = await fetch(`/api/permissions/guide?token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error || '授权动作失败');
+  }
+  updateStatus(payload);
+  authModalStatus.textContent = permissionText(payload);
+  return payload;
+}
+
+async function refreshAuthStatus() {
+  const response = await fetch(`/api/permissions/status?token=${encodeURIComponent(token)}`);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || '权限检测失败');
+  updateStatus(payload);
+  authModalStatus.textContent = permissionText(payload);
+}
+
+function openAuthModal() {
+  authModal.hidden = false;
+  authGuideBtn.classList.add('active');
+  refreshAuthStatus().catch((error) => {
+    authModalStatus.textContent = error.message;
+  });
+}
+
+function closeAuthModal() {
+  authModal.hidden = true;
+  authGuideBtn.classList.remove('active');
+  canvas.focus();
 }
 
 async function drawFrame(blob) {
@@ -680,6 +727,32 @@ copyLinkBtn.addEventListener('click', async () => {
   } catch {
     log(window.location.href);
   }
+});
+
+authGuideBtn.addEventListener('click', openAuthModal);
+authModalClose.addEventListener('click', closeAuthModal);
+authModal.addEventListener('click', (event) => {
+  if (event.target === authModal) closeAuthModal();
+});
+
+document.querySelectorAll('[data-auth-action]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const action = button.dataset.authAction;
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = '处理中...';
+    try {
+      await runAuthAction(action);
+      if (action === 'open_guide') log('已打开授权拖拽弹窗');
+      if (action === 'recheck') log('权限状态已刷新');
+    } catch (error) {
+      authModalStatus.textContent = error.message;
+      log(error.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  });
 });
 
 document.addEventListener('fullscreenchange', () => {

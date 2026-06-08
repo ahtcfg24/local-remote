@@ -5,7 +5,13 @@
   "description": "LAN-only macOS remote screen view and control demo.",
   "type": "module",
   "scripts": {
-    "build:native": "mkdir -p .build && swiftc native/control.swift -o .build/control",
+    "build:native": "mkdir -p .build && swiftc native/control.swift -o .build/control && swiftc native/permission_guide.swift -o .build/permission-guide -framework AppKit -framework ApplicationServices",
+    "bg": "./remote.sh start",
+    "guide": "./remote.sh guide",
+    "stop": "./remote.sh stop",
+    "restart": "./remote.sh restart",
+    "status": "./remote.sh status",
+    "logs": "./remote.sh logs",
     "start": "npm run build:native && node server.js"
   },
   "dependencies": {

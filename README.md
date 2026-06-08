@@ -25,6 +25,33 @@ LAN URL: http://192.168.x.x:8787/?token=local-remote-demo
 
 在同一局域网内的浏览器打开该地址即可。
 
+后台一键启动：
+
+```bash
+./remote.sh
+```
+
+常用后台命令：
+
+```bash
+./remote.sh status
+./remote.sh stop
+./remote.sh restart
+./remote.sh logs
+```
+
+也可以用 `npm run bg`、`npm run status`、`npm run stop`、`npm run restart` 和 `npm run logs`。
+
+## 授权引导
+
+启动服务后，网页右侧点击“授权引导”可以打开授权弹窗。也可以直接运行：
+
+```bash
+./remote.sh guide
+```
+
+引导弹窗会打开对应的 macOS 设置页，并提供可拖拽的 `node` 和 `control` 授权项，尽量减少手动查找文件路径的步骤。macOS 仍会要求用户自己确认权限开关。
+
 ## macOS 权限
 
 这个 demo 依赖 macOS 权限：

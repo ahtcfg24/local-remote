@@ -183,6 +183,10 @@ do {
         {"width":\(Int(bounds.width)),"height":\(Int(bounds.height)),"x":\(Int(bounds.origin.x)),"y":\(Int(bounds.origin.y)),"accessibilityTrusted":\(trusted)}
         """
         print(payload)
+    case "prompt-accessibility":
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        print("{\"accessibilityTrusted\":\(trusted)}")
     case "move":
         postMouseMove(try pointFromArgs(2))
     case "dragmove":

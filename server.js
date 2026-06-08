@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -15,6 +15,7 @@ const FPS = Math.min(12, Math.max(1, Number(process.env.FPS || 6)));
 const FRAME_INTERVAL_MS = Math.round(1000 / FPS);
 const TOKEN = process.env.REMOTE_TOKEN || 'local-remote-demo';
 const CONTROL_BIN = path.join(__dirname, '.build', 'control');
+const PERMISSION_GUIDE_BIN = path.join(__dirname, '.build', 'permission-guide');
 const SCREENSHOT_BIN = '/usr/sbin/screencapture';
 const TMP_DIR = path.join(os.tmpdir(), 'local-remote-control-demo');
 const MAX_TEXT_LENGTH = 500;
@@ -35,6 +36,7 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 const clients = new Set();
 
 app.disable('x-powered-by');
+app.use(express.json({ limit: '20kb' }));
 
 function hasValidToken(rawUrl) {
   try {
@@ -91,6 +93,30 @@ async function captureFrame() {
   } finally {
     fs.rm(file, { force: true }).catch(() => {});
   }
+}
+
+async function ensureNativeBuilt() {
+  await fs.access(CONTROL_BIN);
+  await fs.access(PERMISSION_GUIDE_BIN);
+}
+
+function launchDetached(file, args = []) {
+  const child = spawn(file, args, {
+    cwd: __dirname,
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+async function openSettingsPane(name) {
+  const panes = {
+    screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+  };
+  const target = panes[name];
+  if (!target) throw new Error(`Unknown settings pane: ${name}`);
+  await execFileP('/usr/bin/open', [target], { timeout: 2000, maxBuffer: 128 * 1024 });
 }
 
 function statusPayload(extra = {}) {
@@ -226,6 +252,42 @@ async function handleControlMessage(raw) {
 app.get('/api/info', requireToken, async (_req, res) => {
   await getNativeInfo();
   res.json(statusPayload({ host: HOST, port: PORT }));
+});
+
+app.get('/api/permissions/status', requireToken, async (_req, res) => {
+  await getNativeInfo();
+  await captureFrame();
+  res.json(statusPayload({ host: HOST, port: PORT }));
+});
+
+app.post('/api/permissions/guide', requireToken, async (req, res) => {
+  const action = String(req.body?.action || 'open_guide');
+  try {
+    if (action === 'open_guide') {
+      await ensureNativeBuilt();
+      launchDetached(PERMISSION_GUIDE_BIN, [process.execPath, CONTROL_BIN, __dirname]);
+    } else if (action === 'open_screen_settings') {
+      await openSettingsPane('screen');
+    } else if (action === 'open_accessibility_settings') {
+      await openSettingsPane('accessibility');
+    } else if (action === 'trigger_screen_recording') {
+      await captureFrame();
+    } else if (action === 'trigger_accessibility_prompt') {
+      await execFileP(CONTROL_BIN, ['prompt-accessibility'], { timeout: 5000, maxBuffer: 128 * 1024 });
+    } else if (action !== 'recheck') {
+      res.status(400).json({ error: `Unknown action: ${action}` });
+      return;
+    }
+
+    await getNativeInfo();
+    if (action === 'recheck') await captureFrame();
+    res.json(statusPayload({ host: HOST, port: PORT, action }));
+  } catch (error) {
+    res.status(500).json({
+      error: error.stderr || error.message,
+      action,
+    });
+  }
 });
 
 app.use('/public', express.static(path.join(__dirname, 'public'), {
