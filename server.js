@@ -254,6 +254,11 @@ app.get('/api/info', requireToken, async (_req, res) => {
   res.json(statusPayload({ host: HOST, port: PORT }));
 });
 
+
+app.get('/health', (_req, res) => {
+  res.set('Content-Type', 'text/plain').send('ok');
+});
+
 app.get('/api/permissions/status', requireToken, async (_req, res) => {
   await getNativeInfo();
   await captureFrame();
