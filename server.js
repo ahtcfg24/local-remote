@@ -232,7 +232,12 @@ function broadcastJson(payload) {
 
 // ---------- 控制消息：浏览器 JSON -> 守护进程命令 ----------
 
-function handleControlMessage(raw) {
+// 过滤客户端传来的修饰键数组（鼠标点击与键盘按键共用）
+function sanitizeModifiers(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string').slice(0, 4) : [];
+}
+
+function handleControlMessage(ws, raw) {
   let message;
   try {
     message = JSON.parse(raw);
@@ -244,6 +249,8 @@ function handleControlMessage(raw) {
   const x = Number(message.x) || 0;
   const y = Number(message.y) || 0;
   const button = typeof message.button === 'string' ? message.button : 'left';
+  const count = Math.min(3, Math.max(1, Number(message.count) || 1));
+  const modifiers = sanitizeModifiers(message.modifiers);
 
   switch (message.type) {
     case 'pointer_move':
@@ -251,25 +258,29 @@ function handleControlMessage(raw) {
       break;
     case 'pointer_drag':
       sendToAgent({ cmd: 'drag', x, y, button });
+      // 拖拽期间更新按下坐标，断连补发的 up 落在最后位置
+      if (ws.pressedButtons?.has(button)) ws.pressedButtons.set(button, { x, y });
       break;
     case 'pointer_down':
-      sendToAgent({ cmd: 'down', x, y, button, count: Math.min(3, Math.max(1, Number(message.count) || 1)) });
+      sendToAgent({ cmd: 'down', x, y, button, count, modifiers });
+      // 记录按下的按钮与坐标：客户端异常断开时补发 up，防止远端按键永久卡死
+      ws.pressedButtons?.set(button, { x, y });
       break;
     case 'pointer_up':
-      sendToAgent({ cmd: 'up', x, y, button, count: Math.min(3, Math.max(1, Number(message.count) || 1)) });
+      sendToAgent({ cmd: 'up', x, y, button, count, modifiers });
+      ws.pressedButtons?.delete(button);
       break;
     case 'click':
-      sendToAgent({ cmd: 'click', x, y, button, count: Math.min(3, Math.max(1, Number(message.count) || 1)) });
+      sendToAgent({ cmd: 'click', x, y, button, count, modifiers });
       break;
     case 'wheel':
       sendToAgent({ cmd: 'wheel', dx: Number(message.dx) || 0, dy: Number(message.dy) || 0 });
       break;
     case 'key_press': {
       const key = String(message.key || '').slice(0, 32);
-      const modifiers = Array.isArray(message.modifiers)
-        ? message.modifiers.filter((item) => typeof item === 'string').slice(0, 4)
-        : [];
-      if (key) sendToAgent({ cmd: 'key', key, modifiers });
+      // repeat：同一按键连发次数（IME 差分同步删除/移位大段文本时合并为单条消息）
+      const repeat = Math.min(2000, Math.max(1, Math.trunc(Number(message.repeat)) || 1));
+      if (key) sendToAgent({ cmd: 'key', key, modifiers, repeat });
       break;
     }
     case 'type_text': {
@@ -278,6 +289,8 @@ function handleControlMessage(raw) {
       break;
     }
     case 'ping':
+      // 客户端连接探活：回 pong 证明链路存活（iOS 回前台后的僵尸连接检测）
+      sendJson(ws, { type: 'pong' });
       break;
     default:
       break;
@@ -363,6 +376,8 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws) => {
   clients.add(ws);
+  // 跟踪该客户端按下未释放的鼠标按钮（button -> 最后坐标）
+  ws.pressedButtons = new Map();
   sendJson(ws, statusPayload());
   // 立即补发最后一帧，新连接秒出画面
   if (lastFrame && ws.readyState === ws.OPEN) {
@@ -373,7 +388,7 @@ wss.on('connection', (ws) => {
   ws.on('message', (data, isBinary) => {
     if (isBinary) return;
     try {
-      handleControlMessage(data.toString());
+      handleControlMessage(ws, data.toString());
     } catch (error) {
       console.error(`control message failed: ${error.message}`);
     }
@@ -381,6 +396,13 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clients.delete(ws);
+    // 客户端异常断开（手机锁屏/被系统回收）时补发未释放的按钮，防止远端左键卡死
+    if (ws.pressedButtons?.size) {
+      for (const [button, point] of ws.pressedButtons) {
+        sendToAgent({ cmd: 'up', x: point.x, y: point.y, button });
+      }
+      ws.pressedButtons.clear();
+    }
     broadcastJson(statusPayload());
   });
 

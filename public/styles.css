@@ -13,6 +13,7 @@
   --warn: #d29922;
   --bad: #f85149;
   --radius: 10px;
+  --dock-h: 62px; /* 实际值由 JS 按 dock 测量高度（含安全区）更新 */
 }
 
 * {
@@ -31,6 +32,18 @@ body {
   color: var(--text);
   font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
   overscroll-behavior: none;
+  /* 全局禁用长按选择/呼出菜单，防止操控时误触系统文本选择 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 输入框恢复可选择：iOS 长按粘贴菜单依赖 user-select */
+textarea,
+input[type="text"],
+.log-box pre {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button {
@@ -85,7 +98,11 @@ input[type="text"] {
     "dock";
 }
 
-/* 桌面端：右侧边栏，无底部快捷栏 */
+/* 桌面端：右侧边栏，无底部快捷栏。
+   布局为真·移动优先：基础样式即完整的移动端布局，桌面样式只在本媒体查询内启用。
+   原因：部分浏览器（桌面视口模式/魔改内核）不匹配 (pointer: coarse)，
+   若移动端布局也依赖媒体查询，这类浏览器会落入两套布局之间的空隙——
+   侧栏未被隐藏、被网格自动放置到隐式第二列，形成画面与控制区对角错位的破碎布局 */
 @media (min-width: 901px) and (pointer: fine) {
   .app {
     grid-template-rows: auto 1fr;
@@ -99,38 +116,69 @@ input[type="text"] {
   .kbd-panel {
     display: none;
   }
-}
 
-@media (max-width: 900px), (pointer: coarse) {
   .sidebar {
-    display: none;
+    display: flex;
+  }
+
+  /* 桌面顶栏恢复宽松布局与副文案 */
+  .topbar {
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+
+  .topbar-hint {
+    display: inline;
+  }
+
+  .topbar-title h1 {
+    font-size: 15px;
+    white-space: normal;
   }
 
   .topbar-actions {
-    display: none;
+    display: flex;
+  }
+
+  /* 桌面端画面居中、视图工具条回到顶部悬浮 */
+  .screen-wrap:not(.is-rotated) {
+    align-items: center;
+  }
+
+  .stage-tools {
+    top: max(10px, env(safe-area-inset-top));
+    bottom: auto;
+  }
+
+  .mode-chip {
+    bottom: 56px;
   }
 }
 
-/* ---------- 顶栏 ---------- */
+/* ---------- 顶栏（基础＝移动端：单行紧凑，隐藏副文案与桌面按钮） ---------- */
 
 .topbar {
   grid-area: topbar;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
   padding: 8px 14px;
   padding-top: max(8px, env(safe-area-inset-top));
+  padding-left: max(14px, env(safe-area-inset-left));
+  padding-right: max(14px, env(safe-area-inset-right));
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .topbar-title h1 {
-  font-size: 15px;
+  font-size: 13px;
+  white-space: nowrap;
   margin: 0;
 }
 
 .topbar-hint {
+  display: none;
   color: var(--text-dim);
   font-size: 11px;
 }
@@ -147,7 +195,7 @@ input[type="text"] {
 }
 
 .topbar-actions {
-  display: flex;
+  display: none;
   gap: 8px;
 }
 
@@ -165,6 +213,25 @@ input[type="text"] {
 
 .dot[data-state="closed"] {
   background: var(--bad);
+}
+
+.stats-label,
+.perm-label {
+  white-space: nowrap;
+}
+
+/* 空间不足时状态标签可截断 */
+.stats-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* 权限异常时高亮并可点击打开授权引导（移动端唯一入口） */
+.perm-label.perm-warn {
+  color: var(--warn);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* ---------- 屏幕画面区 ---------- */
@@ -185,6 +252,13 @@ input[type="text"] {
   justify-content: center;
   overflow: hidden;
   container-type: size;
+  touch-action: none; /* 画布外黑边也不触发系统手势（双击缩放/长按选择） */
+}
+
+/* 移动端画面顶部对齐：展示区贴顶，下方黑边与 dock 连成连续的底部控制区，
+   打开键盘抽屉时画面也不被遮挡（横屏旋转视图仍居中以完整显示，桌面端媒体查询内恢复居中） */
+.screen-wrap:not(.is-rotated) {
+  align-items: flex-start;
 }
 
 #screen {
@@ -207,15 +281,62 @@ input[type="text"] {
 
 .remote-cursor {
   position: absolute;
-  width: 14px;
-  height: 14px;
-  margin: -7px 0 0 -7px;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
   border: 2px solid #fff;
   border-radius: 50%;
-  background: rgba(76, 141, 255, 0.55);
+  background: rgba(76, 141, 255, 0.45);
   box-shadow: 0 0 6px rgba(0, 0, 0, 0.7);
   pointer-events: none;
   z-index: 4;
+  transform: scale(var(--cursor-scale, 1));
+  transition: background 0.12s, border-color 0.12s;
+}
+
+/* 十字准星：复杂画面中更易辨认光标中心 */
+.remote-cursor::before,
+.remote-cursor::after {
+  content: "";
+  position: absolute;
+  background: #fff;
+}
+
+.remote-cursor::before {
+  left: 50%;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  margin-left: -1px;
+}
+
+.remote-cursor::after {
+  top: 50%;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  margin-top: -1px;
+}
+
+/* 拖拽中/拖拽锁定：变色放大，让状态随时可读 */
+.remote-cursor.dragging {
+  background: rgba(210, 153, 34, 0.65);
+  border-color: var(--warn);
+  transform: scale(calc(var(--cursor-scale, 1) * 1.35));
+}
+
+/* 右键等瞬时操作的脉冲确认 */
+.remote-cursor.pulse {
+  animation: cursorPulse 0.3s ease-out;
+}
+
+@keyframes cursorPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(76, 141, 255, 0.7);
+  }
+  100% {
+    box-shadow: 0 0 0 18px rgba(76, 141, 255, 0);
+  }
 }
 
 .empty-state {
@@ -224,14 +345,41 @@ input[type="text"] {
   z-index: 2;
 }
 
-/* 悬浮视图工具条 */
+/* 断线遮罩 */
+.conn-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(15, 20, 26, 0.72);
+  backdrop-filter: blur(2px);
+}
+
+.conn-overlay[hidden] {
+  display: none;
+}
+
+.conn-overlay-text {
+  color: var(--text);
+  font-size: 14px;
+}
+
+/* 悬浮视图工具条（基础＝移动端：位于底部拇指可达区，与 dock 集中；桌面端回到顶部） */
 .stage-tools {
   position: absolute;
-  top: 10px;
+  top: auto;
+  bottom: 10px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100% - 16px);
   gap: 6px;
   padding: 6px;
   border-radius: 12px;
@@ -242,6 +390,7 @@ input[type="text"] {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
+  touch-action: manipulation;
 }
 
 .stage:hover .stage-tools,
@@ -263,14 +412,142 @@ body.theater .stage-tools {
   text-align: center;
 }
 
-/* ---------- 桌面侧栏 ---------- */
+/* 操作反馈 toast */
+.toast {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 20, 26, 0.88);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  z-index: 7;
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: calc(100% - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast[hidden] {
+  display: none;
+}
+
+/* 平移模式提示条（bottom 高于 toast 与底部视图工具条，互不重叠） */
+.mode-chip {
+  position: absolute;
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 7;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* 覆盖 button:active 的全局 scale，保留水平居中的 translateX 分量 */
+.mode-chip:active {
+  transform: translateX(-50%) scale(0.97);
+}
+
+.stage.pan-mode .screen-wrap {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+/* 长按充能环 / 触发脉冲：fixed 定位跟随触点 */
+.touch-feedback {
+  position: fixed;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  border: 3px solid var(--warn);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 9;
+  opacity: 0;
+}
+
+.touch-feedback[hidden] {
+  display: none;
+}
+
+/* 右键充能：180ms 静止后出现，320ms 收拢对齐 500ms 长按阈值 */
+.touch-feedback.charge-right {
+  animation: tfCharge 0.32s ease-out forwards;
+}
+
+/* 直触拖拽就绪脉冲 */
+.touch-feedback.pop-ready {
+  border-color: var(--accent);
+  animation: tfPop 0.3s ease-out forwards;
+}
+
+/* 右键触发脉冲 */
+.touch-feedback.pop-fired {
+  animation: tfPop 0.3s ease-out forwards;
+}
+
+@keyframes tfCharge {
+  from {
+    transform: scale(1.7);
+    opacity: 0.15;
+  }
+  to {
+    transform: scale(0.75);
+    opacity: 0.95;
+  }
+}
+
+@keyframes tfPop {
+  from {
+    transform: scale(0.75);
+    opacity: 0.95;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+/* 轻点涟漪确认 */
+.ripple {
+  position: absolute;
+  width: 36px;
+  height: 36px;
+  margin: -18px 0 0 -18px;
+  border-radius: 50%;
+  background: rgba(76, 141, 255, 0.35);
+  pointer-events: none;
+  z-index: 5;
+  animation: rippleAnim 0.35s ease-out forwards;
+}
+
+@keyframes rippleAnim {
+  from {
+    transform: scale(0.5);
+    opacity: 0.8;
+  }
+  to {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+/* ---------- 桌面侧栏（基础隐藏，桌面端媒体查询内显示） ---------- */
 
 .sidebar {
   grid-area: sidebar;
   background: var(--panel);
   border-left: 1px solid var(--border);
   padding: 14px;
-  display: flex;
+  display: none;
   flex-direction: column;
   gap: 16px;
   overflow-y: auto;
@@ -328,15 +605,39 @@ body.theater .stage-tools {
   gap: 8px;
   padding: 8px 10px;
   padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-left: max(10px, env(safe-area-inset-left));
+  padding-right: max(10px, env(safe-area-inset-right));
   background: var(--panel);
   border-top: 1px solid var(--border);
   z-index: 8;
+  touch-action: manipulation;
 }
 
 .dock button {
   flex: 1;
-  padding: 10px 4px;
+  padding: 6px 4px;
   font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-height: 44px;
+}
+
+.dock-btn-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1;
+}
+
+.dock button.active .dock-btn-label {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.dock-btn-value {
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 /* ---------- 键盘抽屉 ---------- */
@@ -345,19 +646,33 @@ body.theater .stage-tools {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(54px + env(safe-area-inset-bottom));
+  bottom: var(--dock-h, 62px);
   background: var(--panel);
   border-top: 1px solid var(--border);
   padding: 10px;
+  padding-left: max(10px, env(safe-area-inset-left));
+  padding-right: max(10px, env(safe-area-inset-right));
   display: flex;
   flex-direction: column;
   gap: 8px;
   z-index: 9;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+  touch-action: manipulation;
 }
 
 .kbd-panel[hidden] {
   display: none;
+}
+
+/* 精简模式：隐藏方向键/快捷键扩展行 */
+.kbd-panel.compact .kbd-extra {
+  display: none;
+}
+
+.kbd-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .kbd-head {
@@ -370,6 +685,40 @@ body.theater .stage-tools {
   font-size: 16px; /* 避免 iOS 聚焦输入框时页面自动放大 */
 }
 
+.kbd-head button {
+  flex-shrink: 0;
+  padding: 7px 10px;
+}
+
+/* 长文本区：textarea + 字数统计 + 发送/清空 */
+.kbd-bulk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kbd-bulk[hidden] {
+  display: none;
+}
+
+.kbd-bulk textarea {
+  font-size: 16px; /* 避免 iOS 聚焦输入框时页面自动放大 */
+  resize: none;
+  min-height: 64px;
+}
+
+.kbd-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kbd-bulk-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-right: auto;
+}
+
 .kbd-row {
   display: flex;
   gap: 6px;
@@ -379,6 +728,68 @@ body.theater .stage-tools {
   flex: 1;
   padding: 9px 2px;
   font-size: 14px;
+}
+
+/* 快捷键行：横向滚动容纳更多按钮，右缘渐隐提示可滚动 */
+.kbd-row.scroll {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to right, #000 92%, transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 92%, transparent);
+}
+
+.kbd-row.scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.kbd-row.scroll button {
+  flex: 0 0 auto;
+  min-width: 56px;
+}
+
+/* ---------- 手势引导 ---------- */
+
+.gesture-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 14px 0;
+}
+
+@media (max-width: 480px) {
+  .gesture-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.gesture-col h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.gesture-col ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.gesture-col li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text);
+}
+
+.gesture-col li span {
+  color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 /* ---------- 沉浸全屏 ---------- */
@@ -408,7 +819,7 @@ body.theater .dock {
   }
 }
 
-/* ---------- 授权弹窗 ---------- */
+/* ---------- 弹窗 ---------- */
 
 .modal-backdrop {
   position: fixed;
@@ -418,7 +829,7 @@ body.theater .dock {
   align-items: center;
   justify-content: center;
   z-index: 20;
-  padding: 16px;
+  padding: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right));
 }
 
 .modal-backdrop[hidden] {
@@ -493,9 +904,4 @@ body.theater .dock {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-}
-
-.stats-label,
-.perm-label {
-  white-space: nowrap;
 }

@@ -2,7 +2,10 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <title>局域网远程控制</title>
@@ -35,6 +38,11 @@
           <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
           <div id="remoteCursor" class="remote-cursor" aria-hidden="true"></div>
           <div id="emptyState" class="empty-state">等待屏幕帧...</div>
+          <!-- 断线遮罩：断开后画面静止，需要显著提示与手动重连入口 -->
+          <div id="connOverlay" class="conn-overlay" hidden>
+            <div class="conn-overlay-text" id="connOverlayText">连接已断开</div>
+            <button id="reconnectNowBtn" type="button">立即重连</button>
+          </div>
         </div>
 
         <!-- 悬浮视图工具条（全屏与移动端可见） -->
@@ -45,7 +53,59 @@
           <button data-view-action="zoom-in" type="button">+</button>
           <button data-view-action="reset" type="button">重置</button>
           <button data-view-action="pan" type="button" id="panBtn">平移</button>
+          <button id="stageFullscreenBtn" type="button">全屏</button>
+          <button id="gestureHelpBtn" type="button">手势</button>
           <button id="fullscreenExitBtn" type="button" hidden>退出全屏</button>
+        </div>
+
+        <!-- 操作反馈 toast（移动端 log 不可见，用 toast 呈现） -->
+        <div id="toast" class="toast" hidden></div>
+
+        <!-- 平移模式常驻提示条：可点击退出，避免困在平移模式 -->
+        <button id="panExitChip" class="mode-chip" type="button" hidden>平移模式 · 点击退出</button>
+
+        <!-- 长按充能环 / 拖拽就绪与右键触发脉冲 -->
+        <div id="touchFeedback" class="touch-feedback" aria-hidden="true" hidden></div>
+
+        <!-- 手势引导浮层 -->
+        <div id="gestureGuide" class="modal-backdrop" hidden>
+          <section class="modal" role="dialog" aria-modal="true" aria-labelledby="gestureGuideTitle">
+            <header class="modal-head">
+              <div>
+                <h2 id="gestureGuideTitle">手势速查</h2>
+                <p>底部「模式」按钮可随时切换两种触控模式</p>
+              </div>
+            </header>
+            <div class="gesture-columns">
+              <div class="gesture-col">
+                <h3>触控板模式</h3>
+                <ul>
+                  <li><span>单指滑动</span>移动光标</li>
+                  <li><span>轻点</span>左键单击</li>
+                  <li><span>快速双击</span>双击</li>
+                  <li><span>双击后按住移动</span>拖拽</li>
+                  <li><span>两指滑动</span>滚动（带惯性）</li>
+                  <li><span>两指轻点</span>右键</li>
+                  <li><span>长按不动</span>右键</li>
+                  <li><span>捏合</span>缩放画面</li>
+                </ul>
+              </div>
+              <div class="gesture-col">
+                <h3>直触模式</h3>
+                <ul>
+                  <li><span>轻点</span>点哪按哪</li>
+                  <li><span>按住 0.3 秒后移动</span>拖拽</li>
+                  <li><span>按住不动 0.5 秒</span>右键</li>
+                  <li><span>两指滑动</span>滚动（带惯性）</li>
+                  <li><span>两指轻点</span>右键</li>
+                  <li><span>捏合</span>缩放画面</li>
+                </ul>
+              </div>
+            </div>
+            <footer class="modal-actions">
+              <button id="gestureGuideClose" type="button">开始使用</button>
+            </footer>
+          </section>
         </div>
       </section>
 
@@ -63,8 +123,8 @@
             <button data-touch-mode="direct" type="button">直接触摸</button>
           </div>
           <p class="hint-line">
-            触控板：单指移动光标，轻点左击，两指滚动，两指轻点右键，双击后按住拖拽。<br />
-            直触：轻点位置点击，按住 0.3 秒后移动为拖拽，长按右键。
+            触控板：单指移动光标，轻点左击（即时响应），两指滚动带惯性，两指轻点右键，双击后按住拖拽。<br />
+            直触：轻点位置点击，按住 0.3 秒后移动为拖拽，按住不动 0.5 秒右键。
           </p>
         </div>
 
@@ -85,26 +145,49 @@
 
       <!-- 移动端底部快捷栏 -->
       <nav class="dock" id="dock" aria-label="快捷操作">
-        <button id="dockModeBtn" type="button">触控板</button>
-        <button id="dockKeyboardBtn" type="button">键盘</button>
-        <button id="dockRightClickBtn" type="button">右键</button>
-        <button id="dockDragBtn" type="button">拖拽</button>
-        <button id="dockViewBtn" type="button">视图</button>
+        <button id="dockModeBtn" type="button">
+          <span class="dock-btn-label">模式</span>
+          <span class="dock-btn-value" id="dockModeValue">触控板</span>
+        </button>
+        <button id="dockKeyboardBtn" type="button"><span class="dock-btn-value">键盘</span></button>
+        <button id="dockRightClickBtn" type="button"><span class="dock-btn-value">右键</span></button>
+        <button id="dockDragBtn" type="button"><span class="dock-btn-value">拖拽</span></button>
+        <button id="dockViewBtn" type="button"><span class="dock-btn-value">视图</span></button>
       </nav>
 
-      <!-- 键盘抽屉：IME 输入 + 修饰键 + 常用键 + 快捷键 -->
+      <!-- 键盘抽屉：IME 输入 + 长文本区 + 修饰键 + 常用键 + 扩展行（方向键/快捷键，可精简收起） -->
       <section class="kbd-panel" id="kbdPanel" hidden>
         <div class="kbd-head">
           <input
             id="imeInput"
             type="text"
+            maxlength="2000"
             placeholder="在此输入，实时发送（支持中文）"
             autocomplete="off"
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"
           />
-          <button id="kbdCloseBtn" type="button" class="ghost">收起</button>
+          <button id="kbdBulkBtn" type="button" class="ghost">长文</button>
+          <button id="kbdMoreBtn" type="button" class="ghost">精简</button>
+          <button id="kbdCloseBtn" type="button" class="ghost">关闭</button>
+        </div>
+        <!-- 长文本区：移动端发送大段文本的入口（桌面端在侧栏），整段分片发送不截断 -->
+        <div class="kbd-bulk" id="kbdBulk" hidden>
+          <textarea
+            id="kbdBulkInput"
+            rows="3"
+            placeholder="粘贴或输入长文本，整段发送到 Mac 前台应用"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+          ></textarea>
+          <div class="kbd-bulk-actions">
+            <span class="kbd-bulk-count" id="kbdBulkCount">0 字</span>
+            <button id="kbdBulkClear" type="button" class="ghost">清空</button>
+            <button id="kbdBulkSend" type="button">发送</button>
+          </div>
         </div>
         <div class="kbd-row" id="modifierRow" aria-label="修饰键">
           <button data-modifier="command" type="button">⌘</button>
@@ -119,20 +202,28 @@
           <button data-key="Backspace" type="button">⌫</button>
           <button data-key="Enter" type="button">⏎</button>
         </div>
-        <div class="kbd-row" aria-label="方向键">
-          <button data-key="ArrowLeft" type="button">←</button>
-          <button data-key="ArrowUp" type="button">↑</button>
-          <button data-key="ArrowDown" type="button">↓</button>
-          <button data-key="ArrowRight" type="button">→</button>
-          <button data-key="ForwardDelete" type="button">Del</button>
-        </div>
-        <div class="kbd-row" aria-label="快捷键">
-          <button data-shortcut="command+c" type="button">⌘C</button>
-          <button data-shortcut="command+v" type="button">⌘V</button>
-          <button data-shortcut="command+x" type="button">⌘X</button>
-          <button data-shortcut="command+a" type="button">⌘A</button>
-          <button data-shortcut="command+z" type="button">⌘Z</button>
-          <button data-shortcut="command+s" type="button">⌘S</button>
+        <div class="kbd-extra">
+          <div class="kbd-row" aria-label="方向键">
+            <button data-key="ArrowLeft" type="button">←</button>
+            <button data-key="ArrowUp" type="button">↑</button>
+            <button data-key="ArrowDown" type="button">↓</button>
+            <button data-key="ArrowRight" type="button">→</button>
+            <button data-key="ForwardDelete" type="button">Del</button>
+          </div>
+          <div class="kbd-row scroll" aria-label="快捷键">
+            <button data-shortcut="command+c" type="button">⌘C</button>
+            <button data-shortcut="command+v" type="button">⌘V</button>
+            <button data-shortcut="command+x" type="button">⌘X</button>
+            <button data-shortcut="command+a" type="button">⌘A</button>
+            <button data-shortcut="command+z" type="button">⌘Z</button>
+            <button data-shortcut="command+s" type="button">⌘S</button>
+            <button data-shortcut="command+space" type="button">⌘␣</button>
+            <button data-shortcut="command+tab" type="button">⌘Tab</button>
+            <button data-shortcut="command+`" type="button">⌘`</button>
+            <button data-shortcut="command+shift+3" type="button">截屏</button>
+            <button data-shortcut="command+shift+4" type="button">框选</button>
+            <button data-shortcut="control+arrowup" type="button">调度</button>
+          </div>
         </div>
       </section>
 

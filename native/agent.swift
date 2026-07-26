@@ -113,9 +113,11 @@ func postMouseMove(_ point: CGPoint) {
     event?.post(tap: .cghidEventTap)
 }
 
-func postMouseButton(_ point: CGPoint, button: CGMouseButton, down: Bool, clickState: Int64 = 1) {
+// flags 支持修饰键+点击（如 ⌘+点击 / ⇧+点击 范围选择）
+func postMouseButton(_ point: CGPoint, button: CGMouseButton, down: Bool, clickState: Int64 = 1, flags: CGEventFlags = []) {
     let event = CGEvent(mouseEventSource: nil, mouseType: mouseEventType(for: button, down: down), mouseCursorPosition: point, mouseButton: button)
     event?.setIntegerValueField(.mouseEventClickState, value: clickState)
+    if !flags.isEmpty { event?.flags = flags }
     event?.post(tap: .cghidEventTap)
 }
 
@@ -125,13 +127,13 @@ func postMouseDrag(_ point: CGPoint, button: CGMouseButton) {
 }
 
 // 多连击必须设置 clickState（1=单击，2=双击），否则 macOS 不识别为双击
-func postClick(_ point: CGPoint, button: CGMouseButton, count: Int) {
+func postClick(_ point: CGPoint, button: CGMouseButton, count: Int, flags: CGEventFlags = []) {
     postMouseMove(point)
     let clicks = max(1, min(3, count))
     for index in 1...clicks {
-        postMouseButton(point, button: button, down: true, clickState: Int64(index))
+        postMouseButton(point, button: button, down: true, clickState: Int64(index), flags: flags)
         usleep(20_000)
-        postMouseButton(point, button: button, down: false, clickState: Int64(index))
+        postMouseButton(point, button: button, down: false, clickState: Int64(index), flags: flags)
         if index < clicks { usleep(60_000) }
     }
 }
@@ -192,9 +194,12 @@ func postKey(code: CGKeyCode, flags: CGEventFlags) {
     up?.post(tap: .cghidEventTap)
 }
 
-// 以 Unicode 直接注入文本，不依赖键盘布局，支持中文等任意字符
+// 以 Unicode 直接注入文本，不依赖键盘布局，支持中文等任意字符。
+// 多字符文本按 1ms/字符 步进注入：零间隔连发大量事件时部分应用会丢字，
+// 微小步进显著提高长文本可靠性；单字符实时输入不受影响
 func postText(_ text: String) {
-    for scalar in text.unicodeScalars {
+    let scalars = Array(text.unicodeScalars)
+    for (index, scalar) in scalars.enumerated() {
         var chars = Array(String(scalar).utf16)
         let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
         down?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
@@ -202,6 +207,7 @@ func postText(_ text: String) {
         let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
         up?.keyboardSetUnicodeString(stringLength: chars.count, unicodeString: &chars)
         up?.post(tap: .cghidEventTap)
+        if index < scalars.count - 1 { usleep(1_000) }
     }
 }
 
@@ -381,20 +387,23 @@ func handleCommand(_ object: [String: Any]) {
         inputQueue.async { postMouseDrag(point, button: button) }
     case "down":
         let point = clampToDisplay(number("x"), number("y"))
-        // count 用于 clickState：桌面端连续快速按下时让远程端识别为真双击/三击
+        // count 用于 clickState：连续快速按下时让远程端识别为真双击/三击
         let downState = Int64(max(1, min(3, Int(number("count")) == 0 ? 1 : Int(number("count")))))
+        let flags = eventFlags(from: modifiers())
         inputQueue.async {
             postMouseMove(point)
-            postMouseButton(point, button: button, down: true, clickState: downState)
+            postMouseButton(point, button: button, down: true, clickState: downState, flags: flags)
         }
     case "up":
         let point = clampToDisplay(number("x"), number("y"))
         let upState = Int64(max(1, min(3, Int(number("count")) == 0 ? 1 : Int(number("count")))))
-        inputQueue.async { postMouseButton(point, button: button, down: false, clickState: upState) }
+        let flags = eventFlags(from: modifiers())
+        inputQueue.async { postMouseButton(point, button: button, down: false, clickState: upState, flags: flags) }
     case "click":
         let point = clampToDisplay(number("x"), number("y"))
         let count = Int(number("count"))
-        inputQueue.async { postClick(point, button: button, count: count == 0 ? 1 : count) }
+        let flags = eventFlags(from: modifiers())
+        inputQueue.async { postClick(point, button: button, count: count == 0 ? 1 : count, flags: flags) }
     case "wheel":
         let dx = number("dx")
         let dy = number("dy")
@@ -402,11 +411,19 @@ func handleCommand(_ object: [String: Any]) {
     case "key":
         let key = object["key"] as? String ?? ""
         let mods = modifiers()
+        // repeat：同一按键连发次数（差分同步的批量退格/方向键合并为单条命令）
+        let rawRepeat = Int(number("repeat"))
+        let repeats = max(1, min(2000, rawRepeat == 0 ? 1 : rawRepeat))
         guard !key.isEmpty else {
             emitError("key command missing key")
             return
         }
-        inputQueue.async { handleKeyCommand(key: key, modifiers: mods) }
+        inputQueue.async {
+            for index in 0..<repeats {
+                handleKeyCommand(key: key, modifiers: mods)
+                if index < repeats - 1 { usleep(1_000) }
+            }
+        }
     case "text":
         let text = object["text"] as? String ?? ""
         guard !text.isEmpty else { return }
