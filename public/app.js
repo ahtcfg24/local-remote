@@ -1,85 +1,173 @@
+// app.js — 远程控制前端
+//
+// 分区：网络层 / 视图变换与坐标映射 / 桌面输入 / 触屏输入（触控板+直触）/ 键盘抽屉 / UI 绑定
+
+// ---------- DOM 引用 ----------
+
 const token = new URLSearchParams(window.location.search).get('token') || '';
-const canvas = document.getElementById('screen');
+const $ = (id) => document.getElementById(id);
+
+const canvas = $('screen');
 const ctx = canvas.getContext('2d');
-const emptyState = document.getElementById('emptyState');
-const connectionDot = document.getElementById('connectionDot');
-const connectionLabel = document.getElementById('connectionLabel');
-const screenLabel = document.getElementById('screenLabel');
-const permissionLabel = document.getElementById('permissionLabel');
-const logOutput = document.getElementById('logOutput');
-const controlEnabled = document.getElementById('controlEnabled');
-const textInput = document.getElementById('textInput');
-const sendText = document.getElementById('sendText');
-const clearText = document.getElementById('clearText');
-const fullscreenBtn = document.getElementById('fullscreenBtn');
-const fullscreenExitBtn = document.getElementById('fullscreenExitBtn');
-const copyLinkBtn = document.getElementById('copyLinkBtn');
-const authGuideBtn = document.getElementById('authGuideBtn');
-const authModal = document.getElementById('authModal');
-const authModalClose = document.getElementById('authModalClose');
-const authModalStatus = document.getElementById('authModalStatus');
-const clickBtn = document.getElementById('clickBtn');
-const doubleClickBtn = document.getElementById('doubleClickBtn');
-const dragLock = document.getElementById('dragLock');
-const pointerLabel = document.getElementById('pointerLabel');
-const screenWrap = document.querySelector('.screen-wrap');
-const appShell = document.querySelector('.app-shell');
-const panMode = document.getElementById('panMode');
-const zoomReadouts = document.querySelectorAll('.zoom-readout');
-const remoteCursor = document.getElementById('remoteCursor');
-const mobileModeBtn = document.getElementById('mobileModeBtn');
+const screenWrap = $('screenWrap');
+const stage = $('stage');
+const emptyState = $('emptyState');
+const remoteCursor = $('remoteCursor');
+const connectionDot = $('connectionDot');
+const connectionLabel = $('connectionLabel');
+const statsLabel = $('statsLabel');
+const permissionLabel = $('permissionLabel');
+const logOutput = $('logOutput');
+const controlEnabled = $('controlEnabled');
+const zoomReadout = $('zoomReadout');
+const panBtn = $('panBtn');
+const stageTools = $('stageTools');
+const fullscreenBtn = $('fullscreenBtn');
+const fullscreenExitBtn = $('fullscreenExitBtn');
+const copyLinkBtn = $('copyLinkBtn');
+const dockModeBtn = $('dockModeBtn');
+const dockKeyboardBtn = $('dockKeyboardBtn');
+const dockRightClickBtn = $('dockRightClickBtn');
+const dockDragBtn = $('dockDragBtn');
+const dockViewBtn = $('dockViewBtn');
+const kbdPanel = $('kbdPanel');
+const kbdCloseBtn = $('kbdCloseBtn');
+const imeInput = $('imeInput');
+const bulkTextInput = $('bulkTextInput');
+const sendBulkText = $('sendBulkText');
+const clearBulkText = $('clearBulkText');
+const authModal = $('authModal');
+const authGuideBtn = $('authGuideBtn');
+const authModalClose = $('authModalClose');
+const authModalStatus = $('authModalStatus');
+
+// ---------- 全局状态 ----------
+
+const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
 
 let ws = null;
-let screen = { width: canvas.width, height: canvas.height };
-let lastMoveAt = 0;
 let reconnectTimer = null;
-let selectedMouseButton = 'left';
-let lastPointer = { x: 0, y: 0 };
+let reconnectDelay = 1000;
+let screenSize = { width: canvas.width, height: canvas.height };
+let cursor = { x: 640, y: 360 };
+let cursorInitialized = false;
+let touchMode = 'trackpad';
 let dragLocked = false;
-let longPressTimer = null;
-let longPressFired = false;
-let remotePointerDown = false;
-let activeMouseButton = 'left';
-let view = {
-  zoom: 1,
-  rotation: 0,
-  panX: 0,
-  panY: 0,
-};
-let panPointerId = null;
-let pinchState = null;
-let touchMode = window.matchMedia('(pointer: coarse)').matches || window.innerWidth <= 900 ? 'trackpad' : 'direct';
-let trackpadPointerId = null;
-let trackpadLastPoint = null;
-let trackpadTravel = 0;
-let touchDownAt = 0;
-let tapCount = 0;
-let tapTimer = null;
-let pointerInitialized = false;
-const activePointers = new Map();
+let view = { zoom: 1, rotation: 0, panX: 0, panY: 0 };
+const stickyModifiers = new Set();
 
-const pointerMoveInterval = window.matchMedia('(pointer: coarse)').matches ? 70 : 35;
-const minZoom = 0.5;
-const maxZoom = 4;
-const trackpadSensitivity = 1.45;
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 5;
+const TAP_MAX_MS = 300;
+const TAP_MAX_TRAVEL = 12;
+const DOUBLE_TAP_MS = 280;
+const LONG_PRESS_MS = 500;
+const DIRECT_DRAG_HOLD_MS = 300;
 
-function permissionText(payload) {
-  const screenRecording = payload.permissions?.screenRecording;
-  const accessibility = payload.permissions?.accessibility;
-  return [
-    screenRecording === 'ok' ? '录屏已就绪' : '录屏待授权',
-    accessibility === 'ok' ? '控制已就绪' : '辅助功能待授权',
-  ].join(' · ');
-}
+// ---------- 日志与状态显示 ----------
 
 function log(message) {
   const time = new Date().toLocaleTimeString();
-  logOutput.textContent = `[${time}] ${message}\n` + logOutput.textContent.split('\n').slice(0, 8).join('\n');
+  logOutput.textContent = `[${time}] ${message}\n` + logOutput.textContent.split('\n').slice(0, 10).join('\n');
 }
 
 function setConnection(state, label) {
   connectionDot.dataset.state = state;
   connectionLabel.textContent = label;
+}
+
+// ---------- 网络层 ----------
+
+let frameCount = 0;
+let byteCount = 0;
+let decoding = false;
+let pendingFrame = null;
+
+async function drawFrame(buffer) {
+  // 解码期间只保留最新一帧，防止慢设备上积压导致延迟
+  if (decoding) {
+    pendingFrame = buffer;
+    return;
+  }
+  decoding = true;
+  try {
+    const bitmap = await createImageBitmap(new Blob([buffer], { type: 'image/jpeg' }));
+    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+    }
+    emptyState.hidden = true;
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+  } catch (error) {
+    log(`绘制屏幕帧失败：${error.message}`);
+  } finally {
+    decoding = false;
+    if (pendingFrame) {
+      const next = pendingFrame;
+      pendingFrame = null;
+      drawFrame(next);
+    }
+  }
+}
+
+function updateStatus(payload) {
+  if (payload.screen?.width && payload.screen?.height) {
+    screenSize = payload.screen;
+    if (!cursorInitialized) {
+      cursor = { x: screenSize.width / 2, y: screenSize.height / 2 };
+      cursorInitialized = true;
+    }
+    screenWrap.style.setProperty('--screen-ratio', String(screenSize.width / screenSize.height));
+    positionRemoteCursor();
+  }
+
+  const perms = [];
+  perms.push(payload.permissions?.screenRecording === 'ok' ? '录屏✓' : '录屏待授权');
+  perms.push(payload.permissions?.accessibility === 'ok' ? '控制✓' : '辅助功能待授权');
+  if (payload.capturing === false && payload.permissions?.screenRecording === 'ok') perms.push('采集重连中');
+  permissionLabel.textContent = perms.join(' · ');
+
+  const errors = [payload.errors?.capture, payload.errors?.agent].filter(Boolean);
+  if (errors.length) log(errors.join('\n'));
+}
+
+function connect() {
+  clearTimeout(reconnectTimer);
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
+  ws.binaryType = 'arraybuffer';
+  setConnection('connecting', '连接中');
+
+  ws.addEventListener('open', () => {
+    setConnection('open', '已连接');
+    reconnectDelay = 1000;
+    log('已连接');
+    if (!isCoarsePointer) canvas.focus();
+  });
+
+  ws.addEventListener('message', (event) => {
+    if (typeof event.data === 'string') {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'status') updateStatus(payload);
+      } catch {
+        log(event.data);
+      }
+      return;
+    }
+    frameCount += 1;
+    byteCount += event.data.byteLength;
+    drawFrame(event.data);
+  });
+
+  ws.addEventListener('close', () => {
+    setConnection('closed', '已断开');
+    reconnectTimer = setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(5000, reconnectDelay + 1000);
+  });
+
+  ws.addEventListener('error', () => setConnection('closed', '连接错误'));
 }
 
 function send(payload) {
@@ -88,9 +176,41 @@ function send(payload) {
   ws.send(JSON.stringify(payload));
 }
 
-function sendPointer(type, point = lastPointer, button = selectedMouseButton) {
-  send({ type, ...point, button });
+// 指针移动/拖拽节流：16ms 内只发最新位置
+let moveTimer = null;
+let pendingMove = null;
+let lastMoveSent = 0;
+
+function sendPointerMove(type, point, button = 'left') {
+  pendingMove = { type, x: point.x, y: point.y, button };
+  const now = performance.now();
+  if (now - lastMoveSent >= 16) {
+    flushMove();
+    return;
+  }
+  if (!moveTimer) {
+    moveTimer = setTimeout(flushMove, 16 - (now - lastMoveSent));
+  }
 }
+
+function flushMove() {
+  clearTimeout(moveTimer);
+  moveTimer = null;
+  if (!pendingMove) return;
+  lastMoveSent = performance.now();
+  send(pendingMove);
+  pendingMove = null;
+}
+
+// 每秒刷新帧率/带宽统计
+setInterval(() => {
+  const mb = byteCount / (1024 * 1024);
+  statsLabel.textContent = `${screenSize.width}×${screenSize.height} · ${frameCount}fps · ${mb.toFixed(1)}MB/s`;
+  frameCount = 0;
+  byteCount = 0;
+}, 1000);
+
+// ---------- 视图变换与坐标映射 ----------
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -102,169 +222,749 @@ function applyViewTransform() {
   canvas.style.setProperty('--view-pan-x', `${view.panX}px`);
   canvas.style.setProperty('--view-pan-y', `${view.panY}px`);
   screenWrap.classList.toggle('is-rotated', view.rotation !== 0);
-  zoomReadouts.forEach((item) => {
-    item.textContent = `${Math.round(view.zoom * 100)}%`;
-  });
+  zoomReadout.textContent = `${Math.round(view.zoom * 100)}%`;
   document.querySelectorAll('[data-view-action="landscape"]').forEach((button) => {
     button.classList.toggle('active', view.rotation !== 0);
-    button.textContent = view.rotation === 0 ? '横屏' : '原向';
-  });
-  document.querySelectorAll('[data-view-action="pan"]').forEach((button) => {
-    button.classList.toggle('active', Boolean(panMode?.checked));
   });
   positionRemoteCursor();
 }
 
 function setZoom(nextZoom, origin = null) {
-  const previousZoom = view.zoom;
-  view.zoom = clamp(nextZoom, minZoom, maxZoom);
-  if (origin && previousZoom !== view.zoom) {
-    view.panX = origin.x - (origin.x - view.panX) * (view.zoom / previousZoom);
-    view.panY = origin.y - (origin.y - view.panY) * (view.zoom / previousZoom);
+  const previous = view.zoom;
+  view.zoom = clamp(nextZoom, MIN_ZOOM, MAX_ZOOM);
+  if (origin && previous !== view.zoom) {
+    view.panX = origin.x - (origin.x - view.panX) * (view.zoom / previous);
+    view.panY = origin.y - (origin.y - view.panY) * (view.zoom / previous);
   }
   applyViewTransform();
 }
 
 function resetView() {
-  view = { zoom: 1, rotation: 0, panX: 0, panY: 0 };
-  if (panMode) panMode.checked = false;
+  view = { zoom: 1, rotation: view.rotation, panX: 0, panY: 0 };
   applyViewTransform();
-  log('视图已重置');
 }
 
+// 画布局部坐标（含旋转）→ 远程屏幕坐标
 function rotatePointForScreen(localX, localY, rect) {
-  const normalizedRotation = ((view.rotation % 360) + 360) % 360;
-  if (normalizedRotation === 90) {
-    return {
-      x: (localY / rect.height) * screen.width,
-      y: (1 - localX / rect.width) * screen.height,
-    };
+  const rotation = ((view.rotation % 360) + 360) % 360;
+  if (rotation === 90) {
+    return { x: (localY / rect.height) * screenSize.width, y: (1 - localX / rect.width) * screenSize.height };
   }
-  if (normalizedRotation === 270) {
-    return {
-      x: (1 - localY / rect.height) * screen.width,
-      y: (localX / rect.width) * screen.height,
-    };
+  if (rotation === 270) {
+    return { x: (1 - localY / rect.height) * screenSize.width, y: (localX / rect.width) * screenSize.height };
   }
-  if (normalizedRotation === 180) {
-    return {
-      x: (1 - localX / rect.width) * screen.width,
-      y: (1 - localY / rect.height) * screen.height,
-    };
+  if (rotation === 180) {
+    return { x: (1 - localX / rect.width) * screenSize.width, y: (1 - localY / rect.height) * screenSize.height };
   }
+  return { x: (localX / rect.width) * screenSize.width, y: (localY / rect.height) * screenSize.height };
+}
+
+function eventToScreenPoint(event) {
+  const rect = canvas.getBoundingClientRect();
+  const mapped = rotatePointForScreen(event.clientX - rect.left, event.clientY - rect.top, rect);
   return {
-    x: (localX / rect.width) * screen.width,
-    y: (localY / rect.height) * screen.height,
+    x: clamp(mapped.x, 0, screenSize.width - 1),
+    y: clamp(mapped.y, 0, screenSize.height - 1),
   };
 }
 
+// 远程屏幕坐标 → 页面坐标（用于远程光标覆盖层定位）
 function screenPointToClient(point) {
   const rect = canvas.getBoundingClientRect();
-  const normalizedRotation = ((view.rotation % 360) + 360) % 360;
+  const rotation = ((view.rotation % 360) + 360) % 360;
   let localX;
   let localY;
-  if (normalizedRotation === 90) {
-    localX = (1 - point.y / screen.height) * rect.width;
-    localY = (point.x / screen.width) * rect.height;
-  } else if (normalizedRotation === 270) {
-    localX = (point.y / screen.height) * rect.width;
-    localY = (1 - point.x / screen.width) * rect.height;
-  } else if (normalizedRotation === 180) {
-    localX = (1 - point.x / screen.width) * rect.width;
-    localY = (1 - point.y / screen.height) * rect.height;
+  if (rotation === 90) {
+    localX = (1 - point.y / screenSize.height) * rect.width;
+    localY = (point.x / screenSize.width) * rect.height;
+  } else if (rotation === 270) {
+    localX = (point.y / screenSize.height) * rect.width;
+    localY = (1 - point.x / screenSize.width) * rect.height;
+  } else if (rotation === 180) {
+    localX = (1 - point.x / screenSize.width) * rect.width;
+    localY = (1 - point.y / screenSize.height) * rect.height;
   } else {
-    localX = (point.x / screen.width) * rect.width;
-    localY = (point.y / screen.height) * rect.height;
+    localX = (point.x / screenSize.width) * rect.width;
+    localY = (point.y / screenSize.height) * rect.height;
   }
   return { x: rect.left + localX, y: rect.top + localY };
 }
 
 function positionRemoteCursor() {
-  if (!remoteCursor) return;
   const wrapRect = screenWrap.getBoundingClientRect();
-  const client = screenPointToClient(lastPointer);
+  const client = screenPointToClient(cursor);
   remoteCursor.style.left = `${client.x - wrapRect.left}px`;
   remoteCursor.style.top = `${client.y - wrapRect.top}px`;
-  remoteCursor.hidden = touchMode !== 'trackpad';
+  remoteCursor.hidden = !(isCoarsePointer && touchMode === 'trackpad');
 }
+
+function moveCursorBy(dx, dy) {
+  cursor = {
+    x: clamp(cursor.x + dx, 0, screenSize.width - 1),
+    y: clamp(cursor.y + dy, 0, screenSize.height - 1),
+  };
+  positionRemoteCursor();
+}
+
+function setCursor(point) {
+  cursor = point;
+  positionRemoteCursor();
+}
+
+// ---------- 修饰键与按键发送 ----------
+
+function currentModifiers() {
+  return Array.from(stickyModifiers);
+}
+
+function clearStickyModifiers() {
+  stickyModifiers.clear();
+  document.querySelectorAll('[data-modifier]').forEach((button) => button.classList.remove('active'));
+}
+
+function sendKey(key, modifiers = null) {
+  const mods = modifiers ?? currentModifiers();
+  send({ type: 'key_press', key, modifiers: mods });
+  if (!modifiers) clearStickyModifiers();
+}
+
+// ---------- 点击计数（让远程端识别真双击）----------
+
+let clickTrack = { time: 0, x: 0, y: 0, count: 0 };
+
+function nextClickCount(point) {
+  const now = performance.now();
+  const near = Math.hypot(point.x - clickTrack.x, point.y - clickTrack.y) < 8;
+  clickTrack = {
+    time: now,
+    x: point.x,
+    y: point.y,
+    count: now - clickTrack.time < 400 && near ? Math.min(3, clickTrack.count + 1) : 1,
+  };
+  return clickTrack.count;
+}
+
+// ---------- 桌面端鼠标/键盘输入 ----------
+
+const mouseButtonNames = ['left', 'middle', 'right'];
+let desktopButtonDown = null;
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.pointerType === 'touch') {
+    handleTouchDown(event);
+    return;
+  }
+  canvas.setPointerCapture?.(event.pointerId);
+  canvas.focus();
+  const point = eventToScreenPoint(event);
+  setCursor(point);
+  const button = mouseButtonNames[event.button] || 'left';
+  desktopButtonDown = button;
+  send({ type: 'pointer_down', ...point, button, count: nextClickCount(point) });
+  event.preventDefault();
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (event.pointerType === 'touch') {
+    handleTouchMove(event);
+    return;
+  }
+  const point = eventToScreenPoint(event);
+  setCursor(point);
+  if (desktopButtonDown) {
+    sendPointerMove('pointer_drag', point, desktopButtonDown);
+  } else {
+    sendPointerMove('pointer_move', point);
+  }
+});
+
+canvas.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'touch') {
+    handleTouchUp(event);
+    return;
+  }
+  const point = eventToScreenPoint(event);
+  setCursor(point);
+  if (desktopButtonDown) {
+    flushMove();
+    send({ type: 'pointer_up', ...point, button: desktopButtonDown, count: clickTrack.count });
+    desktopButtonDown = null;
+  }
+  event.preventDefault();
+});
+
+canvas.addEventListener('pointercancel', (event) => {
+  if (event.pointerType === 'touch') {
+    handleTouchCancel(event);
+    return;
+  }
+  if (desktopButtonDown) {
+    send({ type: 'pointer_up', ...cursor, button: desktopButtonDown });
+    desktopButtonDown = null;
+  }
+});
+
+canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+canvas.addEventListener(
+  'wheel',
+  (event) => {
+    // Ctrl/⌘ + 滚轮缩放本地视图，其余透传远程滚动
+    if (event.ctrlKey || event.metaKey) {
+      const rect = canvas.getBoundingClientRect();
+      const origin = {
+        x: event.clientX - (rect.left + rect.width / 2),
+        y: event.clientY - (rect.top + rect.height / 2),
+      };
+      setZoom(view.zoom * (event.deltaY < 0 ? 1.12 : 0.88), origin);
+    } else {
+      const scale = event.deltaMode === 1 ? 16 : 1;
+      send({ type: 'wheel', dx: event.deltaX * scale, dy: event.deltaY * scale });
+    }
+    event.preventDefault();
+  },
+  { passive: false },
+);
+
+const namedKeyMap = {
+  Enter: 'enter', Escape: 'escape', Backspace: 'backspace', Delete: 'forwarddelete',
+  Tab: 'tab', ' ': 'space', ArrowLeft: 'arrowleft', ArrowRight: 'arrowright',
+  ArrowUp: 'arrowup', ArrowDown: 'arrowdown', Home: 'home', End: 'end',
+  PageUp: 'pageup', PageDown: 'pagedown', CapsLock: 'capslock',
+  F1: 'f1', F2: 'f2', F3: 'f3', F4: 'f4', F5: 'f5', F6: 'f6',
+  F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+};
+
+canvas.addEventListener('keydown', (event) => {
+  const modifiers = [];
+  if (event.shiftKey) modifiers.push('shift');
+  if (event.ctrlKey) modifiers.push('control');
+  if (event.altKey) modifiers.push('option');
+  if (event.metaKey) modifiers.push('command');
+
+  if (namedKeyMap[event.key]) {
+    sendKey(namedKeyMap[event.key], modifiers);
+    event.preventDefault();
+    return;
+  }
+  if (event.key.length === 1) {
+    if (modifiers.length && !(modifiers.length === 1 && modifiers[0] === 'shift')) {
+      // 组合快捷键（如 ⌘C）用键码发送
+      sendKey(event.key.toLowerCase(), modifiers);
+    } else {
+      send({ type: 'type_text', text: event.key });
+    }
+    event.preventDefault();
+  }
+});
+
+// ---------- 触屏输入 ----------
+
+const touches = new Map();
+let longPressTimer = null;
+let suppressTap = false;
+let pendingTap = null;
+let touchDragging = false;
+let dragArmed = false;
+let directHoldTimer = null;
+let twoFinger = null;
+let panPointerId = null;
+const TRACKPAD_BASE_SENSITIVITY = 1.1;
+
+function cancelLongPress() {
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+}
+
+function trackpadAcceleration(dx, dy, dtMs) {
+  // 根据滑动速度调节灵敏度：慢速精确、快速跨屏
+  const speed = Math.hypot(dx, dy) / Math.max(1, dtMs);
+  const factor = clamp(0.9 + speed * 2.4, 0.9, 3.6);
+  return TRACKPAD_BASE_SENSITIVITY * factor;
+}
+
+function beginRemoteDrag(point) {
+  touchDragging = true;
+  send({ type: 'pointer_down', ...point, button: 'left' });
+}
+
+function endRemoteDrag(point) {
+  if (!touchDragging) return;
+  touchDragging = false;
+  flushMove();
+  send({ type: 'pointer_up', ...point, button: 'left' });
+}
+
+function handleTouchDown(event) {
+  canvas.setPointerCapture?.(event.pointerId);
+  const now = performance.now();
+  touches.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY,
+    startX: event.clientX,
+    startY: event.clientY,
+    startTime: now,
+    travel: 0,
+    lastTime: now,
+  });
+  event.preventDefault();
+
+  if (panBtn.classList.contains('active') && touches.size === 1) {
+    panPointerId = event.pointerId;
+    return;
+  }
+
+  if (touches.size === 2) {
+    // 进入双指手势：取消单指的一切待定行为
+    cancelLongPress();
+    clearTimeout(directHoldTimer);
+    if (pendingTap) {
+      clearTimeout(pendingTap.timer);
+      pendingTap = null;
+    }
+    const points = Array.from(touches.values());
+    twoFinger = {
+      mode: null,
+      startTime: now,
+      startDistance: Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) || 1,
+      lastMid: { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 },
+      startMid: { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 },
+      startZoom: view.zoom,
+      startPanX: view.panX,
+      startPanY: view.panY,
+    };
+    return;
+  }
+  if (touches.size > 2) {
+    twoFinger = null;
+    return;
+  }
+
+  suppressTap = false;
+
+  // 快速二次按下：取消待发的单击；随后移动则为拖拽，快速抬起则为双击
+  if (pendingTap) {
+    clearTimeout(pendingTap.timer);
+    pendingTap = null;
+    dragArmed = true;
+  }
+
+  if (touchMode === 'direct') {
+    const point = eventToScreenPoint(event);
+    setCursor(point);
+    // 按住不动一段时间进入拖拽
+    directHoldTimer = setTimeout(() => {
+      const info = touches.get(event.pointerId);
+      if (info && info.travel < TAP_MAX_TRAVEL && touches.size === 1 && !touchDragging) {
+        suppressTap = true;
+        beginRemoteDrag(eventFromInfo(info));
+      }
+    }, DIRECT_DRAG_HOLD_MS);
+  }
+
+  // 长按（未移动）→ 右键
+  longPressTimer = setTimeout(() => {
+    const info = touches.get(event.pointerId);
+    if (info && info.travel < TAP_MAX_TRAVEL && touches.size === 1 && !touchDragging) {
+      suppressTap = true;
+      const point = touchMode === 'direct' ? eventFromInfo(info) : cursor;
+      send({ type: 'click', ...point, button: 'right', count: 1 });
+      navigator.vibrate?.(20);
+      log('长按 → 右键');
+    }
+  }, LONG_PRESS_MS);
+}
+
+// 将触点当前位置换算为远程屏幕坐标（直触模式用）
+function eventFromInfo(info) {
+  const rect = canvas.getBoundingClientRect();
+  const mapped = rotatePointForScreen(info.x - rect.left, info.y - rect.top, rect);
+  return {
+    x: clamp(mapped.x, 0, screenSize.width - 1),
+    y: clamp(mapped.y, 0, screenSize.height - 1),
+  };
+}
+
+function handleTouchMove(event) {
+  const info = touches.get(event.pointerId);
+  if (!info) return;
+  const dx = event.clientX - info.x;
+  const dy = event.clientY - info.y;
+  const now = performance.now();
+  const dt = now - info.lastTime;
+  info.x = event.clientX;
+  info.y = event.clientY;
+  info.travel += Math.abs(dx) + Math.abs(dy);
+  info.lastTime = now;
+  event.preventDefault();
+
+  if (info.travel > TAP_MAX_TRAVEL) cancelLongPress();
+
+  if (panPointerId === event.pointerId) {
+    view.panX += dx;
+    view.panY += dy;
+    applyViewTransform();
+    return;
+  }
+
+  if (touches.size === 2 && twoFinger) {
+    handleTwoFingerMove();
+    return;
+  }
+  if (touches.size !== 1) return;
+
+  if (touchMode === 'trackpad') {
+    if (dragArmed && !touchDragging && info.travel > 4) {
+      // 双击-按住-移动：从当前光标位置开始拖拽
+      beginRemoteDrag(cursor);
+    }
+    const accel = trackpadAcceleration(dx, dy, dt);
+    // 视图旋转 90° 时，手指位移也旋转映射，保证方向直觉一致
+    const rotated = rotateDelta(dx * accel, dy * accel);
+    moveCursorBy(rotated.dx, rotated.dy);
+    sendPointerMove(touchDragging || dragLocked ? 'pointer_drag' : 'pointer_move', cursor);
+    return;
+  }
+
+  // 直触模式：移动即移动光标（悬停），拖拽状态下发送拖拽
+  const point = eventToScreenPoint(event);
+  setCursor(point);
+  if (touchDragging || dragLocked) {
+    sendPointerMove('pointer_drag', point);
+  } else if (info.travel > TAP_MAX_TRAVEL) {
+    clearTimeout(directHoldTimer);
+    sendPointerMove('pointer_move', point);
+  }
+}
+
+function rotateDelta(dx, dy) {
+  const rotation = ((view.rotation % 360) + 360) % 360;
+  if (rotation === 90) return { dx: dy, dy: -dx };
+  if (rotation === 270) return { dx: -dy, dy: dx };
+  if (rotation === 180) return { dx: -dx, dy: -dy };
+  return { dx, dy };
+}
+
+function handleTwoFingerMove() {
+  const points = Array.from(touches.values());
+  if (points.length < 2 || !twoFinger) return;
+  const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) || 1;
+  const mid = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+
+  // 手势判定：先看距离变化（捏合缩放），再看整体位移（滚动），锁定后不再切换
+  if (!twoFinger.mode) {
+    const distanceChange = Math.abs(distance - twoFinger.startDistance);
+    const midTravel = Math.hypot(mid.x - twoFinger.startMid.x, mid.y - twoFinger.startMid.y);
+    if (distanceChange > 30) twoFinger.mode = 'pinch';
+    else if (midTravel > 10) twoFinger.mode = 'scroll';
+  }
+
+  if (twoFinger.mode === 'pinch') {
+    const wrapRect = screenWrap.getBoundingClientRect();
+    const origin = {
+      x: mid.x - (wrapRect.left + wrapRect.width / 2),
+      y: mid.y - (wrapRect.top + wrapRect.height / 2),
+    };
+    setZoom(twoFinger.startZoom * (distance / twoFinger.startDistance), origin);
+  } else if (twoFinger.mode === 'scroll') {
+    const rotated = rotateDelta(mid.x - twoFinger.lastMid.x, mid.y - twoFinger.lastMid.y);
+    // 内容跟随手指的自然滚动方向
+    send({ type: 'wheel', dx: -rotated.dx * 2.4, dy: -rotated.dy * 2.4 });
+  }
+  twoFinger.lastMid = mid;
+}
+
+function handleTouchUp(event) {
+  const info = touches.get(event.pointerId);
+  touches.delete(event.pointerId);
+  event.preventDefault();
+  cancelLongPress();
+  clearTimeout(directHoldTimer);
+
+  if (panPointerId === event.pointerId) {
+    panPointerId = null;
+    return;
+  }
+
+  if (twoFinger) {
+    // 双指快速轻点 → 右键
+    const now = performance.now();
+    if (!twoFinger.mode && now - twoFinger.startTime < TAP_MAX_MS) {
+      const point = touchMode === 'direct' && info ? eventFromInfo(info) : cursor;
+      send({ type: 'click', ...point, button: 'right', count: 1 });
+      log('双指轻点 → 右键');
+    }
+    // 另一根手指随后抬起时不再触发单击
+    suppressTap = true;
+    if (touches.size < 2) twoFinger = null;
+    return;
+  }
+
+  if (!info) return;
+  const now = performance.now();
+  const duration = now - info.startTime;
+
+  if (touchDragging) {
+    const point = touchMode === 'direct' ? eventFromInfo(info) : cursor;
+    endRemoteDrag(point);
+    dragArmed = false;
+    return;
+  }
+  dragArmed = false;
+
+  const isTap = duration < TAP_MAX_MS && info.travel < TAP_MAX_TRAVEL && !suppressTap;
+  if (!isTap) {
+    dragArmed = false;
+    return;
+  }
+
+  const point = touchMode === 'direct' ? eventFromInfo(info) : cursor;
+  if (touchMode === 'direct') setCursor(point);
+
+  // 延迟单击以区分双击：双击时合并为一次 count=2 的真双击
+  if (dragArmed) {
+    dragArmed = false;
+    send({ type: 'click', ...point, button: 'left', count: 2 });
+  } else {
+    pendingTap = {
+      timer: setTimeout(() => {
+        pendingTap = null;
+        send({ type: 'click', ...point, button: 'left', count: 1 });
+      }, DOUBLE_TAP_MS),
+    };
+  }
+}
+
+function handleTouchCancel(event) {
+  touches.delete(event.pointerId);
+  cancelLongPress();
+  clearTimeout(directHoldTimer);
+  twoFinger = null;
+  panPointerId = null;
+  dragArmed = false;
+  if (touchDragging) endRemoteDrag(cursor);
+}
+
+// ---------- 触控模式与拖拽锁定 ----------
 
 function setTouchMode(mode, announce = true) {
   touchMode = mode;
   document.querySelectorAll('[data-touch-mode]').forEach((button) => {
-    button.classList.toggle('active', button.dataset.touchMode === touchMode);
+    button.classList.toggle('active', button.dataset.touchMode === mode);
   });
-  if (mobileModeBtn) mobileModeBtn.textContent = touchMode === 'trackpad' ? '触控板' : '直触';
+  dockModeBtn.textContent = mode === 'trackpad' ? '触控板' : '直触';
   positionRemoteCursor();
-  if (announce) log(touchMode === 'trackpad' ? '触控板模式已开启' : '直接触摸模式已开启');
+  if (announce) log(mode === 'trackpad' ? '触控板模式' : '直接触摸模式');
 }
 
-function mouseButtonLabel(button) {
-  return button === 'left' ? '左键' : button === 'right' ? '右键' : '中键';
+function setDragLock(locked) {
+  if (locked === dragLocked) return;
+  dragLocked = locked;
+  dockDragBtn.classList.toggle('active', locked);
+  if (locked) {
+    send({ type: 'pointer_down', ...cursor, button: 'left' });
+    log('拖拽锁定开启');
+  } else {
+    send({ type: 'pointer_up', ...cursor, button: 'left' });
+    log('拖拽锁定关闭');
+  }
 }
 
-function setSelectedMouseButton(button) {
-  selectedMouseButton = button;
-  document.querySelectorAll('[data-mouse-button]').forEach((item) => {
-    item.classList.toggle('active', item.dataset.mouseButton === selectedMouseButton);
-  });
-  log(`鼠标按键：${mouseButtonLabel(button)}`);
+// ---------- 键盘抽屉与 IME ----------
+
+let imePrev = '';
+let composing = false;
+
+function openKeyboard() {
+  kbdPanel.hidden = false;
+  dockKeyboardBtn.classList.add('active');
+  imeInput.focus();
 }
 
-function setDragLock(checked) {
-  if (checked === dragLocked) return;
-  dragLocked = checked;
-  dragLock.checked = checked;
-  if (dragLocked) {
-    activeMouseButton = selectedMouseButton;
-    sendPointer('pointer_down');
-    remotePointerDown = true;
-    log('拖拽锁定已开启');
+function closeKeyboard() {
+  kbdPanel.hidden = true;
+  dockKeyboardBtn.classList.remove('active');
+  imeInput.blur();
+}
+
+// 输入框内容差分同步：删除的部分发退格，新增的部分发文本（IME 组合完成后一次性发送）
+function syncImeInput() {
+  const current = imeInput.value;
+  if (current === imePrev) return;
+  let prefix = 0;
+  const max = Math.min(current.length, imePrev.length);
+  while (prefix < max && current[prefix] === imePrev[prefix]) prefix += 1;
+  const removed = imePrev.length - prefix;
+  const added = current.slice(prefix);
+  for (let i = 0; i < Math.min(removed, 100); i += 1) {
+    send({ type: 'key_press', key: 'backspace', modifiers: [] });
+  }
+  if (added) send({ type: 'type_text', text: added });
+  imePrev = current;
+}
+
+imeInput.addEventListener('compositionstart', () => {
+  composing = true;
+});
+imeInput.addEventListener('compositionend', () => {
+  composing = false;
+  syncImeInput();
+});
+imeInput.addEventListener('input', () => {
+  if (!composing) syncImeInput();
+});
+imeInput.addEventListener('keydown', (event) => {
+  if (composing) return;
+  if (event.key === 'Enter') {
+    sendKey('enter', []);
+    imeInput.value = '';
+    imePrev = '';
+    event.preventDefault();
     return;
   }
-  if (remotePointerDown) {
-    sendPointer('pointer_up');
-    remotePointerDown = false;
+  if (event.key === 'Backspace' && imeInput.value === '') {
+    sendKey('backspace', []);
+    event.preventDefault();
+    return;
   }
-  log('拖拽锁定已关闭');
-}
+  // 有修饰键激活时，字母作为快捷键发送而非输入
+  if (stickyModifiers.size && event.key.length === 1) {
+    sendKey(event.key.toLowerCase());
+    event.preventDefault();
+  }
+});
 
-function canvasPoint(event) {
-  const rect = canvas.getBoundingClientRect();
-  const mapped = rotatePointForScreen(event.clientX - rect.left, event.clientY - rect.top, rect);
-  return {
-    x: clamp(mapped.x, 0, screen.width - 1),
-    y: clamp(mapped.y, 0, screen.height - 1),
-  };
-}
-
-function updatePointer(point) {
-  lastPointer = point;
-  pointerLabel.textContent = `指针：${Math.round(point.x)}, ${Math.round(point.y)} · ${mouseButtonLabel(selectedMouseButton)}`;
-  positionRemoteCursor();
-}
-
-function updateStatus(payload) {
-  if (payload.screen?.width && payload.screen?.height) {
-    screen = payload.screen;
-    if (!pointerInitialized) {
-      lastPointer = { x: screen.width / 2, y: screen.height / 2 };
-      pointerInitialized = true;
+document.querySelectorAll('[data-modifier]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const name = button.dataset.modifier;
+    if (stickyModifiers.has(name)) {
+      stickyModifiers.delete(name);
+      button.classList.remove('active');
+    } else {
+      stickyModifiers.add(name);
+      button.classList.add('active');
     }
-    canvas.width = screen.width;
-    canvas.height = screen.height;
-    canvas.style.setProperty('--screen-aspect', `${screen.width} / ${screen.height}`);
-    canvas.style.setProperty('--screen-ratio', screen.width / screen.height);
-    screenLabel.textContent = `${screen.width} × ${screen.height} · ${payload.fps || '--'} FPS`;
-    positionRemoteCursor();
+    imeInput.focus();
+  });
+});
+
+document.querySelectorAll('[data-key]').forEach((button) => {
+  button.addEventListener('click', () => {
+    sendKey(button.dataset.key.toLowerCase());
+    if (!kbdPanel.hidden) imeInput.focus();
+  });
+});
+
+document.querySelectorAll('[data-shortcut]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const parts = button.dataset.shortcut.split('+');
+    const key = parts.pop();
+    sendKey(key, parts);
+    if (!kbdPanel.hidden) imeInput.focus();
+  });
+});
+
+sendBulkText.addEventListener('click', () => {
+  const text = bulkTextInput.value;
+  if (!text) return;
+  send({ type: 'type_text', text });
+  log(`已发送 ${text.length} 个字符`);
+});
+
+clearBulkText.addEventListener('click', () => {
+  bulkTextInput.value = '';
+});
+
+// ---------- 视图操作与全屏 ----------
+
+async function toggleLandscapeView() {
+  view.rotation = view.rotation === 0 ? 90 : 0;
+  view.panX = 0;
+  view.panY = 0;
+  applyViewTransform();
+  if (document.fullscreenElement && window.screen.orientation?.lock) {
+    try {
+      if (view.rotation === 90) await window.screen.orientation.lock('landscape');
+      else window.screen.orientation.unlock?.();
+    } catch {
+      // 部分浏览器不支持方向锁定，视图旋转已生效即可
+    }
   }
-
-  const screenRecording = payload.permissions?.screenRecording;
-  const accessibility = payload.permissions?.accessibility;
-  permissionLabel.textContent = permissionText(payload);
-
-  const errors = [payload.errors?.frame, payload.errors?.control].filter(Boolean);
-  if (errors.length) log(errors.join('\n'));
 }
+
+document.querySelectorAll('[data-view-action]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const action = button.dataset.viewAction;
+    if (action === 'zoom-in') setZoom(view.zoom * 1.2);
+    if (action === 'zoom-out') setZoom(view.zoom / 1.2);
+    if (action === 'reset') resetView();
+    if (action === 'landscape') await toggleLandscapeView();
+    if (action === 'pan') {
+      panBtn.classList.toggle('active');
+      log(panBtn.classList.contains('active') ? '单指平移视图开启' : '单指平移视图关闭');
+    }
+  });
+});
+
+function setFullscreenUi(active) {
+  document.body.classList.toggle('theater', active);
+  fullscreenBtn.textContent = active ? '退出全屏' : '全屏';
+  fullscreenExitBtn.hidden = !active;
+}
+
+async function enterFullscreen() {
+  setFullscreenUi(true);
+  try {
+    if (!document.fullscreenElement && stage.requestFullscreen) {
+      await stage.requestFullscreen();
+    }
+  } catch {
+    // iOS Safari 不支持元素全屏，仅使用页面沉浸布局
+  }
+}
+
+async function exitFullscreen() {
+  if (document.fullscreenElement) await document.exitFullscreen();
+  window.screen.orientation?.unlock?.();
+  setFullscreenUi(false);
+}
+
+fullscreenBtn.addEventListener('click', () => {
+  if (document.body.classList.contains('theater')) exitFullscreen();
+  else enterFullscreen();
+});
+fullscreenExitBtn.addEventListener('click', exitFullscreen);
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && !document.body.classList.contains('theater')) return;
+  setFullscreenUi(Boolean(document.fullscreenElement));
+});
+
+// ---------- 底部快捷栏 ----------
+
+dockModeBtn.addEventListener('click', () => setTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad'));
+dockKeyboardBtn.addEventListener('click', () => (kbdPanel.hidden ? openKeyboard() : closeKeyboard()));
+dockRightClickBtn.addEventListener('click', () => send({ type: 'click', ...cursor, button: 'right', count: 1 }));
+dockDragBtn.addEventListener('click', () => setDragLock(!dragLocked));
+dockViewBtn.addEventListener('click', () => {
+  stageTools.classList.toggle('open');
+  dockViewBtn.classList.toggle('active');
+});
+kbdCloseBtn.addEventListener('click', closeKeyboard);
+
+document.querySelectorAll('[data-touch-mode]').forEach((button) => {
+  button.addEventListener('click', () => setTouchMode(button.dataset.touchMode));
+});
+
+// ---------- 其它 UI ----------
+
+copyLinkBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(window.location.href);
+    log('已复制控制台地址');
+  } catch {
+    log(window.location.href);
+  }
+});
 
 async function runAuthAction(action) {
   const response = await fetch(`/api/permissions/guide?token=${encodeURIComponent(token)}`, {
@@ -273,550 +973,58 @@ async function runAuthAction(action) {
     body: JSON.stringify({ action }),
   });
   const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error || '授权动作失败');
-  }
+  if (!response.ok) throw new Error(payload.error || '授权动作失败');
   updateStatus(payload);
-  authModalStatus.textContent = permissionText(payload);
-  return payload;
+  authModalStatus.textContent = permissionLabel.textContent;
 }
 
-async function refreshAuthStatus() {
-  const response = await fetch(`/api/permissions/status?token=${encodeURIComponent(token)}`);
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || '权限检测失败');
-  updateStatus(payload);
-  authModalStatus.textContent = permissionText(payload);
-}
-
-function openAuthModal() {
+authGuideBtn.addEventListener('click', () => {
   authModal.hidden = false;
-  authGuideBtn.classList.add('active');
-  refreshAuthStatus().catch((error) => {
-    authModalStatus.textContent = error.message;
-  });
-}
-
-function closeAuthModal() {
+  fetch(`/api/permissions/status?token=${encodeURIComponent(token)}`)
+    .then((res) => res.json())
+    .then((payload) => {
+      updateStatus(payload);
+      authModalStatus.textContent = permissionLabel.textContent;
+    })
+    .catch((error) => {
+      authModalStatus.textContent = error.message;
+    });
+});
+authModalClose.addEventListener('click', () => {
   authModal.hidden = true;
-  authGuideBtn.classList.remove('active');
-  canvas.focus();
-}
-
-async function drawFrame(blob) {
-  const bitmap = await createImageBitmap(blob);
-  emptyState.hidden = true;
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close?.();
-}
-
-function connect() {
-  clearTimeout(reconnectTimer);
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-  ws.binaryType = 'blob';
-  setConnection('connecting', '连接中');
-
-  ws.addEventListener('open', () => {
-    setConnection('open', '已连接');
-    log('WebSocket 已连接');
-    canvas.focus();
-  });
-
-  ws.addEventListener('message', async (event) => {
-    if (typeof event.data === 'string') {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'status') updateStatus(payload);
-      } catch {
-        log(event.data);
-      }
-      return;
-    }
-    try {
-      await drawFrame(event.data);
-    } catch (error) {
-      log(`绘制屏幕帧失败：${error.message}`);
-    }
-  });
-
-  ws.addEventListener('close', () => {
-    setConnection('closed', '已断开');
-    log('连接断开，2 秒后重试');
-    reconnectTimer = setTimeout(connect, 2000);
-  });
-
-  ws.addEventListener('error', () => {
-    setConnection('closed', '连接错误');
-  });
-}
-
-function pointerSnapshot(event) {
-  return { x: event.clientX, y: event.clientY };
-}
-
-function pointerDistance(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function pointerMidpoint(a, b) {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
-
-function startPinch() {
-  const points = Array.from(activePointers.values());
-  if (points.length < 2) return;
-  pinchState = {
-    distance: pointerDistance(points[0], points[1]) || 1,
-    midpoint: pointerMidpoint(points[0], points[1]),
-    zoom: view.zoom,
-    panX: view.panX,
-    panY: view.panY,
-  };
-}
-
-function updatePinch() {
-  if (!pinchState || activePointers.size < 2) return;
-  const points = Array.from(activePointers.values());
-  const distance = pointerDistance(points[0], points[1]) || 1;
-  const midpoint = pointerMidpoint(points[0], points[1]);
-  view.zoom = clamp(pinchState.zoom * (distance / pinchState.distance), minZoom, maxZoom);
-  view.panX = pinchState.panX + midpoint.x - pinchState.midpoint.x;
-  view.panY = pinchState.panY + midpoint.y - pinchState.midpoint.y;
-  applyViewTransform();
-}
-
-canvas.addEventListener('pointermove', (event) => {
-  const previous = activePointers.get(event.pointerId);
-  if (previous) activePointers.set(event.pointerId, pointerSnapshot(event));
-
-  if (activePointers.size >= 2) {
-    updatePinch();
-    event.preventDefault();
-    return;
-  }
-
-  if (panPointerId === event.pointerId && previous) {
-    view.panX += event.clientX - previous.x;
-    view.panY += event.clientY - previous.y;
-    applyViewTransform();
-    event.preventDefault();
-    return;
-  }
-
-  if (event.pointerType === 'touch' && touchMode === 'trackpad' && trackpadPointerId === event.pointerId && trackpadLastPoint) {
-    const dx = (event.clientX - trackpadLastPoint.x) * trackpadSensitivity;
-    const dy = (event.clientY - trackpadLastPoint.y) * trackpadSensitivity;
-    trackpadLastPoint = pointerSnapshot(event);
-    trackpadTravel += Math.abs(dx) + Math.abs(dy);
-    if (Math.abs(dx) + Math.abs(dy) > 0.5) {
-      updatePointer({
-        x: clamp(lastPointer.x + dx, 0, screen.width - 1),
-        y: clamp(lastPointer.y + dy, 0, screen.height - 1),
-      });
-      sendPointer(remotePointerDown ? 'pointer_drag' : 'pointer_move', lastPointer, activeMouseButton);
-    }
-    event.preventDefault();
-    return;
-  }
-
-  const now = performance.now();
-  if (now - lastMoveAt < pointerMoveInterval) return;
-  lastMoveAt = now;
-  const point = canvasPoint(event);
-  updatePointer(point);
-  if (event.pointerType === 'touch' && !dragLocked) {
-    event.preventDefault();
-    return;
-  }
-  sendPointer(dragLocked || remotePointerDown ? 'pointer_drag' : 'pointer_move', point, activeMouseButton);
 });
-
-canvas.addEventListener('pointerdown', (event) => {
-  canvas.setPointerCapture?.(event.pointerId);
-  canvas.focus();
-  activePointers.set(event.pointerId, pointerSnapshot(event));
-  clearTimeout(longPressTimer);
-  longPressFired = false;
-
-  if (activePointers.size >= 2) {
-    startPinch();
-    event.preventDefault();
-    return;
-  }
-
-  if (panMode?.checked) {
-    panPointerId = event.pointerId;
-    event.preventDefault();
-    return;
-  }
-
-  if (event.pointerType === 'touch' && touchMode === 'trackpad' && !dragLocked) {
-    trackpadPointerId = event.pointerId;
-    trackpadLastPoint = pointerSnapshot(event);
-    trackpadTravel = 0;
-    touchDownAt = performance.now();
-    longPressTimer = setTimeout(() => {
-      longPressFired = true;
-      sendPointer('click', lastPointer, 'right');
-      log('长按已发送右键单击');
-    }, 650);
-    event.preventDefault();
-    return;
-  }
-
-  const point = canvasPoint(event);
-  updatePointer(point);
-
-  if (event.pointerType === 'touch' && !dragLocked) {
-    longPressTimer = setTimeout(() => {
-      longPressFired = true;
-      sendPointer('click', point, 'right');
-      log('长按已发送右键单击');
-    }, 650);
-    event.preventDefault();
-    return;
-  }
-
-  if (!dragLocked) {
-    const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : selectedMouseButton;
-    activeMouseButton = button;
-    sendPointer('pointer_down', point, button);
-    remotePointerDown = true;
-  }
-  event.preventDefault();
-});
-
-canvas.addEventListener('pointerup', (event) => {
-  const wasPinching = activePointers.size >= 2;
-  activePointers.delete(event.pointerId);
-  if (wasPinching) {
-    pinchState = activePointers.size >= 2 ? pinchState : null;
-    event.preventDefault();
-    return;
-  }
-
-  if (panPointerId === event.pointerId) {
-    panPointerId = null;
-    event.preventDefault();
-    return;
-  }
-
-  if (event.pointerType === 'touch' && touchMode === 'trackpad' && trackpadPointerId === event.pointerId) {
-    clearTimeout(longPressTimer);
-    trackpadPointerId = null;
-    trackpadLastPoint = null;
-    const isTap = performance.now() - touchDownAt < 420 && trackpadTravel < 12;
-    if (isTap && !longPressFired) {
-      tapCount += 1;
-      clearTimeout(tapTimer);
-      tapTimer = setTimeout(() => {
-        if (tapCount >= 2) {
-          sendPointer('double_click', lastPointer, selectedMouseButton);
-          log('触控板双击');
-        } else {
-          sendPointer('click', lastPointer, selectedMouseButton);
-          log('触控板单击');
-        }
-        tapCount = 0;
-      }, 220);
-    }
-    longPressFired = false;
-    trackpadTravel = 0;
-    event.preventDefault();
-    return;
-  }
-
-  const point = canvasPoint(event);
-  updatePointer(point);
-  clearTimeout(longPressTimer);
-  if (event.pointerType === 'touch' && !dragLocked) {
-    if (!longPressFired) sendPointer('click', point, selectedMouseButton);
-    longPressFired = false;
-    event.preventDefault();
-    return;
-  }
-
-  if (!dragLocked && remotePointerDown) {
-    const button = event.button === 2 ? 'right' : event.button === 1 ? 'middle' : selectedMouseButton;
-    sendPointer('pointer_up', point, button);
-    remotePointerDown = false;
-    activeMouseButton = selectedMouseButton;
-  }
-  event.preventDefault();
-});
-
-canvas.addEventListener('pointercancel', () => {
-  clearTimeout(longPressTimer);
-  activePointers.clear();
-  panPointerId = null;
-  pinchState = null;
-  if (!dragLocked && remotePointerDown) {
-    sendPointer('pointer_up', lastPointer, activeMouseButton);
-    remotePointerDown = false;
-    activeMouseButton = selectedMouseButton;
-  }
-});
-
-canvas.addEventListener('contextmenu', (event) => {
-  event.preventDefault();
-});
-
-canvas.addEventListener(
-  'wheel',
-  (event) => {
-    if (event.ctrlKey || event.metaKey) {
-      const rect = canvas.getBoundingClientRect();
-      const origin = {
-        x: event.clientX - (rect.left + rect.width / 2),
-        y: event.clientY - (rect.top + rect.height / 2),
-      };
-      setZoom(view.zoom * (event.deltaY < 0 ? 1.12 : 0.88), origin);
-      event.preventDefault();
-      return;
-    }
-    send({ type: 'wheel', dx: event.deltaX, dy: event.deltaY });
-    event.preventDefault();
-  },
-  { passive: false },
-);
-
-document.querySelectorAll('[data-mouse-button]').forEach((button) => {
-  button.addEventListener('click', () => {
-    setSelectedMouseButton(button.dataset.mouseButton);
-    canvas.focus();
-  });
-});
-
-document.querySelectorAll('[data-touch-mode]').forEach((button) => {
-  button.addEventListener('click', () => {
-    setTouchMode(button.dataset.touchMode);
-    canvas.focus();
-  });
-});
-
-clickBtn.addEventListener('click', () => {
-  sendPointer('click');
-  canvas.focus();
-});
-
-doubleClickBtn.addEventListener('click', () => {
-  sendPointer('double_click');
-  canvas.focus();
-});
-
-dragLock.addEventListener('change', () => {
-  setDragLock(dragLock.checked);
-  canvas.focus();
-});
-
-document.querySelectorAll('[data-scroll]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const direction = button.dataset.scroll;
-    const amount = 320;
-    const delta = {
-      up: { dx: 0, dy: -amount },
-      down: { dx: 0, dy: amount },
-      left: { dx: -amount, dy: 0 },
-      right: { dx: amount, dy: 0 },
-    }[direction];
-    send({ type: 'wheel', ...delta });
-    canvas.focus();
-  });
-});
-
-async function toggleLandscapeView() {
-  const nextRotation = view.rotation === 0 ? 90 : 0;
-  view.rotation = nextRotation;
-  view.panX = 0;
-  view.panY = 0;
-  applyViewTransform();
-
-  if ((document.fullscreenElement || appShell.classList.contains('theater-mode')) && window.screen.orientation?.lock) {
-    try {
-      if (nextRotation === 90) {
-        await window.screen.orientation.lock('landscape');
-      } else {
-        window.screen.orientation.unlock?.();
-      }
-    } catch (error) {
-      log(`横屏锁定不可用，已使用视图旋转：${error.message}`);
-    }
-  }
-}
-
-document.querySelectorAll('[data-view-action]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const action = button.dataset.viewAction;
-    if (action === 'zoom-in') setZoom(view.zoom * 1.18);
-    if (action === 'zoom-out') setZoom(view.zoom / 1.18);
-    if (action === 'reset') resetView();
-    if (action === 'landscape') await toggleLandscapeView();
-    if (action === 'pan' && panMode) {
-      panMode.checked = !panMode.checked;
-      log(panMode.checked ? '平移视图已开启' : '平移视图已关闭');
-    }
-    canvas.focus();
-  });
-});
-
-document.querySelectorAll('[data-mobile-action]').forEach((button) => {
-  button.addEventListener('click', () => {
-    const action = button.dataset.mobileAction;
-    if (action === 'mode') setTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad');
-    if (action === 'left-click') sendPointer('click', lastPointer, 'left');
-    if (action === 'right-click') sendPointer('click', lastPointer, 'right');
-    if (action === 'keyboard') {
-      textInput.focus();
-      return;
-    }
-    if (action === 'zoom-in') setZoom(view.zoom * 1.18);
-    if (action === 'zoom-out') setZoom(view.zoom / 1.18);
-    canvas.focus();
-  });
-});
-
-panMode?.addEventListener('change', () => {
-  applyViewTransform();
-  log(panMode.checked ? '平移视图已开启' : '平移视图已关闭');
-  canvas.focus();
-});
-
-function setFullscreenUi(active) {
-  appShell.classList.toggle('theater-mode', active);
-  screenWrap.classList.toggle('is-fullscreen', active);
-  fullscreenBtn.textContent = active ? '退出全屏' : '全屏';
-  canvas.focus();
-}
-
-async function enterFullscreenMode() {
-  setFullscreenUi(true);
-  try {
-    if (!document.fullscreenElement && screenWrap.requestFullscreen) {
-      await screenWrap.requestFullscreen();
-    }
-  } catch (error) {
-    log(`已进入页面全屏；系统全屏不可用：${error.message}`);
-  }
-}
-
-async function exitFullscreenMode() {
-  if (document.fullscreenElement) {
-    await document.exitFullscreen();
-  }
-  window.screen.orientation?.unlock?.();
-  setFullscreenUi(false);
-}
-
-fullscreenBtn.addEventListener('click', async () => {
-  if (document.fullscreenElement || appShell.classList.contains('theater-mode')) {
-    await exitFullscreenMode();
-    return;
-  }
-  await enterFullscreenMode();
-});
-
-fullscreenExitBtn.addEventListener('click', async () => {
-  await exitFullscreenMode();
-});
-
-copyLinkBtn.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(window.location.href);
-    log('已复制当前控制台地址');
-  } catch {
-    log(window.location.href);
-  }
-});
-
-authGuideBtn.addEventListener('click', openAuthModal);
-authModalClose.addEventListener('click', closeAuthModal);
 authModal.addEventListener('click', (event) => {
-  if (event.target === authModal) closeAuthModal();
+  if (event.target === authModal) authModal.hidden = true;
 });
 
 document.querySelectorAll('[data-auth-action]').forEach((button) => {
   button.addEventListener('click', async () => {
-    const action = button.dataset.authAction;
-    const originalText = button.textContent;
+    const original = button.textContent;
     button.disabled = true;
     button.textContent = '处理中...';
     try {
-      await runAuthAction(action);
-      if (action === 'open_guide') log('已打开授权拖拽弹窗');
-      if (action === 'recheck') log('权限状态已刷新');
+      await runAuthAction(button.dataset.authAction);
     } catch (error) {
       authModalStatus.textContent = error.message;
       log(error.message);
     } finally {
       button.disabled = false;
-      button.textContent = originalText;
+      button.textContent = original;
     }
   });
 });
 
-document.addEventListener('fullscreenchange', () => {
-  setFullscreenUi(Boolean(document.fullscreenElement));
-});
-
-canvas.addEventListener('keydown', (event) => {
-  const namedKeys = new Set([
-    'Enter',
-    'Escape',
-    'Backspace',
-    'Tab',
-    'ArrowLeft',
-    'ArrowRight',
-    'ArrowUp',
-    'ArrowDown',
-    'Home',
-    'End',
-    'PageUp',
-    'PageDown',
-  ]);
-
-  if (namedKeys.has(event.key)) {
-    send({
-      type: 'key_press',
-      key: event.key,
-      modifiers: ['shift', 'control', 'option', 'command'].filter((name) => {
-        const prop = name === 'option' ? 'altKey' : name === 'command' ? 'metaKey' : `${name}Key`;
-        return event[prop];
-      }),
-    });
-    event.preventDefault();
-    return;
-  }
-
-  if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
-    send({ type: 'type_text', text: event.key });
-    event.preventDefault();
-  }
-});
-
-sendText.addEventListener('click', () => {
-  const text = textInput.value;
-  if (!text) return;
-  send({ type: 'type_text', text });
-  log(`已发送 ${text.length} 个字符`);
-});
-
-clearText.addEventListener('click', () => {
-  textInput.value = '';
-});
-
-document.querySelectorAll('[data-key]').forEach((button) => {
-  button.addEventListener('click', () => {
-    send({ type: 'key_press', key: button.dataset.key });
-    canvas.focus();
-  });
-});
-
 window.addEventListener('beforeunload', () => {
-  if (dragLocked || remotePointerDown) sendPointer('pointer_up');
+  if (dragLocked || touchDragging || desktopButtonDown) {
+    send({ type: 'pointer_up', ...cursor, button: 'left' });
+  }
   ws?.close();
 });
 
-setTouchMode(touchMode, false);
+window.addEventListener('resize', positionRemoteCursor);
+
+// ---------- 启动 ----------
+
+setTouchMode(isCoarsePointer ? 'trackpad' : 'direct', false);
 applyViewTransform();
 connect();

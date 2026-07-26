@@ -31,10 +31,11 @@ SERVICE_UNIT="local-remote-$SERVICE_ID.service"
 PROC_PATTERN="local-remote-control-demo"
 
 # 默认环境变量(可由 shell 环境覆盖)
+# REMOTE_TOKEN 留空时由 server.js 自动生成随机 token 并持久化到 .run/token
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8787}"
-FPS="${FPS:-6}"
-REMOTE_TOKEN="${REMOTE_TOKEN:-local-remote-demo}"
+FPS="${FPS:-15}"
+REMOTE_TOKEN="${REMOTE_TOKEN:-}"
 
 # --- 加载 .env ---
 load_env() {
@@ -125,7 +126,7 @@ ensure_dependencies() {
 
 # --- 构建 native Swift helper ---
 ensure_native_built() {
-  if [ -x .build/control ] && [ -x .build/permission-guide ]; then
+  if [ -x .build/agent ] && [ -x .build/permission-guide ]; then
     return
   fi
 
@@ -144,8 +145,8 @@ prepare_runtime() {
   # 更新 env 变量(加载 .env 后可能已变化)
   HOST="${HOST:-0.0.0.0}"
   PORT="${PORT:-8787}"
-  FPS="${FPS:-6}"
-  REMOTE_TOKEN="${REMOTE_TOKEN:-local-remote-demo}"
+  FPS="${FPS:-15}"
+  REMOTE_TOKEN="${REMOTE_TOKEN:-}"
 
   # 端口选择
   local port_selection changed selected_port
@@ -234,7 +235,10 @@ write_service_runner() {
     printf 'export HOST=%q\n' "$HOST"
     printf 'export PORT=%q\n' "$PORT"
     printf 'export FPS=%q\n' "$FPS"
-    printf 'export REMOTE_TOKEN=%q\n' "$REMOTE_TOKEN"
+    # token 为空时不导出,让 server.js 自动生成随机 token
+    if [ -n "$REMOTE_TOKEN" ]; then
+      printf 'export REMOTE_TOKEN=%q\n' "$REMOTE_TOKEN"
+    fi
     printf 'exec %q server.js' "$node_bin"
     for arg in "$@"; do
       printf ' %q' "$arg"
@@ -246,10 +250,16 @@ write_service_runner() {
 
 # --- 写入 macOS LaunchAgent 配置 ---
 install_launchd_service() {
-  local plist node_bin
+  local plist node_bin token_xml=""
   plist="$(launchd_plist_path)"
   node_bin="$(command -v node)"
   mkdir -p "$(dirname "$plist")"
+
+  # token 为空时不写入 plist,由 server.js 自动生成
+  if [ -n "$REMOTE_TOKEN" ]; then
+    token_xml="    <key>REMOTE_TOKEN</key>
+    <string>$(xml_escape "$REMOTE_TOKEN")</string>"
+  fi
 
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -278,8 +288,7 @@ install_launchd_service() {
     <string>$(xml_escape "$PORT")</string>
     <key>FPS</key>
     <string>$(xml_escape "$FPS")</string>
-    <key>REMOTE_TOKEN</key>
-    <string>$(xml_escape "$REMOTE_TOKEN")</string>
+$token_xml
   </dict>
   <key>StandardOutPath</key>
   <string>$(xml_escape "$ROOT_DIR/$LOG_FILE")</string>
@@ -292,9 +301,13 @@ EOF
 
 # --- 写入 Linux systemd user service 配置 ---
 install_systemd_service() {
-  local unit
+  local unit token_env=""
   unit="$(systemd_unit_path)"
   mkdir -p "$(dirname "$unit")"
+
+  if [ -n "$REMOTE_TOKEN" ]; then
+    token_env="Environment=\"REMOTE_TOKEN=$(systemd_escape_value "$REMOTE_TOKEN")\""
+  fi
 
   cat > "$unit" <<EOF
 [Unit]
@@ -311,7 +324,7 @@ RestartSec=3
 Environment="HOST=$(systemd_escape_value "$HOST")"
 Environment="PORT=$(systemd_escape_value "$PORT")"
 Environment="FPS=$(systemd_escape_value "$FPS")"
-Environment="REMOTE_TOKEN=$(systemd_escape_value "$REMOTE_TOKEN")"
+$token_env
 
 [Install]
 WantedBy=default.target
@@ -378,6 +391,15 @@ start_service_backend() {
   esac
 }
 
+# --- 有效 token: 环境变量优先,否则读取 server.js 生成的持久化 token ---
+effective_token() {
+  if [ -n "$REMOTE_TOKEN" ]; then
+    printf '%s' "$REMOTE_TOKEN"
+  else
+    tr -d '\n' < "$RUN_DIR/token" 2>/dev/null || true
+  fi
+}
+
 # --- LAN 地址 ---
 lan_addresses() {
   local result=()
@@ -399,12 +421,14 @@ wait_for_health() {
   done
 
   if [ "$ready" = "1" ]; then
+    local token
+    token="$(effective_token)"
     echo "[start] 已就绪,监听 http://$PROBE_HOST:$PORT"
-    echo "[start] 控制台: http://$PROBE_HOST:$PORT/?token=$REMOTE_TOKEN"
+    echo "[start] 控制台: http://$PROBE_HOST:$PORT/?token=$token"
     echo "[start] LAN 地址:"
     local addr
     while IFS= read -r addr; do
-      [ -n "$addr" ] && echo "  http://$addr:$PORT/?token=$REMOTE_TOKEN"
+      [ -n "$addr" ] && echo "  http://$addr:$PORT/?token=$token"
     done < <(lan_addresses)
     echo "[start] 查看日志: tail -f $LOG_FILE   停止当前实例: ./start.sh stop"
     return
@@ -459,7 +483,7 @@ status_managed_service() {
       if launchctl print "$(launchd_target)" >/dev/null 2>&1; then
         if launchctl print "$(launchd_target)" 2>/dev/null | grep -q "state = running"; then
           echo "[start] service 运行中 ($SERVICE_LABEL)"
-          echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$REMOTE_TOKEN"
+          echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
           return 0
         fi
         echo "[start] service 已安装但当前未运行 ($SERVICE_LABEL)"
@@ -469,7 +493,7 @@ status_managed_service() {
     systemd)
       if systemctl --user is-active --quiet "$SERVICE_UNIT"; then
         echo "[start] service 运行中 ($SERVICE_UNIT)"
-        echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$REMOTE_TOKEN"
+        echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
         return 0
       fi
       if systemctl --user is-enabled --quiet "$SERVICE_UNIT" 2>/dev/null; then

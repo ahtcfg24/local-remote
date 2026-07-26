@@ -2,133 +2,141 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>局域网远程控制 Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>局域网远程控制</title>
     <link rel="stylesheet" href="/public/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <main class="app" id="app">
+      <!-- 顶部状态栏 -->
       <header class="topbar">
-        <div>
-          <h1>局域网远程控制 Demo</h1>
-          <p>仅适合可信局域网；无 TLS，不要暴露到公网。</p>
+        <div class="topbar-title">
+          <h1>局域网远程控制</h1>
+          <span class="topbar-hint">仅限可信局域网 · 无 TLS</span>
         </div>
         <div class="status-strip" aria-live="polite">
-          <span id="connectionDot" class="dot"></span>
+          <span id="connectionDot" class="dot" data-state="connecting"></span>
           <span id="connectionLabel">连接中</span>
-          <span id="screenLabel">--</span>
-          <span id="permissionLabel">权限检测中</span>
+          <span id="statsLabel" class="stats-label">--</span>
+          <span id="permissionLabel" class="perm-label">权限检测中</span>
+        </div>
+        <div class="topbar-actions">
+          <button id="authGuideBtn" type="button" class="ghost">授权引导</button>
+          <button id="copyLinkBtn" type="button" class="ghost">复制地址</button>
+          <button id="fullscreenBtn" type="button" class="ghost">全屏</button>
         </div>
       </header>
 
-      <section class="workspace">
-        <div class="screen-wrap">
+      <!-- 屏幕画面区 -->
+      <section class="stage" id="stage">
+        <div class="screen-wrap" id="screenWrap">
           <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
           <div id="remoteCursor" class="remote-cursor" aria-hidden="true"></div>
           <div id="emptyState" class="empty-state">等待屏幕帧...</div>
-          <div class="fullscreen-tools" aria-label="全屏视图工具">
-            <button data-view-action="landscape" type="button">横屏</button>
-            <button data-view-action="zoom-out" type="button">-</button>
-            <span class="zoom-readout">100%</span>
-            <button data-view-action="zoom-in" type="button">+</button>
-            <button data-view-action="reset" type="button">重置</button>
-            <button data-view-action="pan" type="button">平移</button>
-          </div>
-          <button id="fullscreenExitBtn" type="button" class="fullscreen-exit">退出全屏</button>
         </div>
 
-        <aside class="control-panel">
-          <div class="panel-head">
-            <label class="toggle-row">
-              <input id="controlEnabled" type="checkbox" checked />
-              <span>启用远程控制</span>
-            </label>
-            <div class="panel-actions">
-              <button id="authGuideBtn" type="button" class="secondary">授权引导</button>
-              <button id="copyLinkBtn" type="button" class="secondary">复制地址</button>
-              <button id="fullscreenBtn" type="button" class="secondary">全屏</button>
-            </div>
-          </div>
-
-          <div class="tool-section">
-            <div class="section-title">视图</div>
-            <div class="segmented" role="group" aria-label="触控模式">
-              <button data-touch-mode="trackpad" type="button" class="active">触控板</button>
-              <button data-touch-mode="direct" type="button">直接触摸</button>
-            </div>
-            <div class="view-grid">
-              <button data-view-action="landscape" type="button" class="secondary">横屏</button>
-              <button data-view-action="reset" type="button" class="secondary">重置</button>
-              <button data-view-action="zoom-out" type="button" class="secondary">缩小</button>
-              <div class="zoom-readout zoom-card">100%</div>
-              <button data-view-action="zoom-in" type="button" class="secondary">放大</button>
-            </div>
-            <label class="toggle-row drag-toggle">
-              <input id="panMode" type="checkbox" />
-              <span>平移视图</span>
-            </label>
-          </div>
-
-          <div class="tool-section">
-            <div class="section-title">鼠标</div>
-            <div class="segmented" role="group" aria-label="鼠标按键">
-              <button data-mouse-button="left" type="button" class="active">左键</button>
-              <button data-mouse-button="right" type="button">右键</button>
-              <button data-mouse-button="middle" type="button">中键</button>
-            </div>
-            <div class="button-row">
-              <button id="clickBtn" type="button">单击</button>
-              <button id="doubleClickBtn" type="button" class="secondary">双击</button>
-            </div>
-            <label class="toggle-row drag-toggle">
-              <input id="dragLock" type="checkbox" />
-              <span>拖拽锁定</span>
-            </label>
-            <div class="scroll-pad" aria-label="滚动">
-              <button data-scroll="up" type="button">上滚</button>
-              <button data-scroll="left" type="button">左滚</button>
-              <button data-scroll="right" type="button">右滚</button>
-              <button data-scroll="down" type="button">下滚</button>
-            </div>
-            <div id="pointerLabel" class="hint-line">指针：--</div>
-          </div>
-
-          <label class="field">
-            <span>发送文本到本机前台应用</span>
-            <textarea id="textInput" rows="5" placeholder="输入后点击发送"></textarea>
-          </label>
-
-          <div class="button-row">
-            <button id="sendText" type="button">发送文本</button>
-            <button id="clearText" type="button" class="secondary">清空</button>
-          </div>
-
-          <div class="key-grid" aria-label="快捷键">
-            <button data-key="Escape" type="button">Esc</button>
-            <button data-key="Backspace" type="button">⌫</button>
-            <button data-key="Enter" type="button">Enter</button>
-            <button data-key="Tab" type="button">Tab</button>
-            <button data-key="ArrowUp" type="button">↑</button>
-            <button data-key="ArrowLeft" type="button">←</button>
-            <button data-key="ArrowDown" type="button">↓</button>
-            <button data-key="ArrowRight" type="button">→</button>
-          </div>
-
-          <div class="log-box">
-            <div class="log-title">状态</div>
-            <pre id="logOutput">准备连接...</pre>
-          </div>
-        </aside>
+        <!-- 悬浮视图工具条（全屏与移动端可见） -->
+        <div class="stage-tools" id="stageTools">
+          <button data-view-action="landscape" type="button">横屏</button>
+          <button data-view-action="zoom-out" type="button">−</button>
+          <span class="zoom-readout" id="zoomReadout">100%</span>
+          <button data-view-action="zoom-in" type="button">+</button>
+          <button data-view-action="reset" type="button">重置</button>
+          <button data-view-action="pan" type="button" id="panBtn">平移</button>
+          <button id="fullscreenExitBtn" type="button" hidden>退出全屏</button>
+        </div>
       </section>
-      <nav class="mobile-dock" aria-label="移动端快捷操作">
-        <button id="mobileModeBtn" data-mobile-action="mode" type="button">触控板</button>
-        <button data-mobile-action="left-click" type="button">左击</button>
-        <button data-mobile-action="right-click" type="button">右击</button>
-        <button data-mobile-action="keyboard" type="button">键盘</button>
-        <button data-mobile-action="zoom-out" type="button">-</button>
-        <button data-mobile-action="zoom-in" type="button">+</button>
+
+      <!-- 桌面端侧栏 -->
+      <aside class="sidebar">
+        <label class="toggle-row">
+          <input id="controlEnabled" type="checkbox" checked />
+          <span>启用远程控制</span>
+        </label>
+
+        <div class="tool-section">
+          <div class="section-title">触控模式（移动端）</div>
+          <div class="segmented" role="group" aria-label="触控模式">
+            <button data-touch-mode="trackpad" type="button" class="active">触控板</button>
+            <button data-touch-mode="direct" type="button">直接触摸</button>
+          </div>
+          <p class="hint-line">
+            触控板：单指移动光标，轻点左击，两指滚动，两指轻点右键，双击后按住拖拽。<br />
+            直触：轻点位置点击，按住 0.3 秒后移动为拖拽，长按右键。
+          </p>
+        </div>
+
+        <div class="tool-section">
+          <div class="section-title">发送文本</div>
+          <textarea id="bulkTextInput" rows="3" placeholder="输入后点击发送到本机前台应用"></textarea>
+          <div class="button-row">
+            <button id="sendBulkText" type="button">发送文本</button>
+            <button id="clearBulkText" type="button" class="ghost">清空</button>
+          </div>
+        </div>
+
+        <div class="log-box">
+          <div class="section-title">状态</div>
+          <pre id="logOutput">准备连接...</pre>
+        </div>
+      </aside>
+
+      <!-- 移动端底部快捷栏 -->
+      <nav class="dock" id="dock" aria-label="快捷操作">
+        <button id="dockModeBtn" type="button">触控板</button>
+        <button id="dockKeyboardBtn" type="button">键盘</button>
+        <button id="dockRightClickBtn" type="button">右键</button>
+        <button id="dockDragBtn" type="button">拖拽</button>
+        <button id="dockViewBtn" type="button">视图</button>
       </nav>
 
+      <!-- 键盘抽屉：IME 输入 + 修饰键 + 常用键 + 快捷键 -->
+      <section class="kbd-panel" id="kbdPanel" hidden>
+        <div class="kbd-head">
+          <input
+            id="imeInput"
+            type="text"
+            placeholder="在此输入，实时发送（支持中文）"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+          />
+          <button id="kbdCloseBtn" type="button" class="ghost">收起</button>
+        </div>
+        <div class="kbd-row" id="modifierRow" aria-label="修饰键">
+          <button data-modifier="command" type="button">⌘</button>
+          <button data-modifier="control" type="button">⌃</button>
+          <button data-modifier="option" type="button">⌥</button>
+          <button data-modifier="shift" type="button">⇧</button>
+        </div>
+        <div class="kbd-row" aria-label="常用键">
+          <button data-key="Escape" type="button">Esc</button>
+          <button data-key="Tab" type="button">Tab</button>
+          <button data-key="Space" type="button">Space</button>
+          <button data-key="Backspace" type="button">⌫</button>
+          <button data-key="Enter" type="button">⏎</button>
+        </div>
+        <div class="kbd-row" aria-label="方向键">
+          <button data-key="ArrowLeft" type="button">←</button>
+          <button data-key="ArrowUp" type="button">↑</button>
+          <button data-key="ArrowDown" type="button">↓</button>
+          <button data-key="ArrowRight" type="button">→</button>
+          <button data-key="ForwardDelete" type="button">Del</button>
+        </div>
+        <div class="kbd-row" aria-label="快捷键">
+          <button data-shortcut="command+c" type="button">⌘C</button>
+          <button data-shortcut="command+v" type="button">⌘V</button>
+          <button data-shortcut="command+x" type="button">⌘X</button>
+          <button data-shortcut="command+a" type="button">⌘A</button>
+          <button data-shortcut="command+z" type="button">⌘Z</button>
+          <button data-shortcut="command+s" type="button">⌘S</button>
+        </div>
+      </section>
+
+      <!-- 授权引导弹窗 -->
       <div id="authModal" class="modal-backdrop" hidden>
         <section class="modal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
           <header class="modal-head">
@@ -138,33 +146,31 @@
             </div>
             <button id="authModalClose" type="button" class="icon-button" aria-label="关闭">×</button>
           </header>
-
           <div class="auth-steps">
             <div class="auth-step">
               <div>
                 <strong>屏幕录制</strong>
-                <span>把弹窗里的 Node 拖到“屏幕录制”列表并打开开关。</span>
+                <span>把弹窗里的 Node 与 agent 拖到"屏幕录制"列表并打开开关。</span>
               </div>
               <div class="auth-actions">
-                <button data-auth-action="open_screen_settings" type="button" class="secondary">打开设置</button>
+                <button data-auth-action="open_screen_settings" type="button" class="ghost">打开设置</button>
                 <button data-auth-action="trigger_screen_recording" type="button">触发请求</button>
               </div>
             </div>
             <div class="auth-step">
               <div>
                 <strong>辅助功能</strong>
-                <span>把弹窗里的 control 拖到“辅助功能”列表并打开开关。</span>
+                <span>把弹窗里的 agent 拖到"辅助功能"列表并打开开关。</span>
               </div>
               <div class="auth-actions">
-                <button data-auth-action="open_accessibility_settings" type="button" class="secondary">打开设置</button>
+                <button data-auth-action="open_accessibility_settings" type="button" class="ghost">打开设置</button>
                 <button data-auth-action="trigger_accessibility_prompt" type="button">触发请求</button>
               </div>
             </div>
           </div>
-
           <footer class="modal-actions">
             <button data-auth-action="open_guide" type="button">打开拖拽弹窗</button>
-            <button data-auth-action="recheck" type="button" class="secondary">重新检测</button>
+            <button data-auth-action="recheck" type="button" class="ghost">重新检测</button>
           </footer>
         </section>
       </div>

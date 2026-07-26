@@ -1,11 +1,11 @@
 {
   "name": "local-remote-control-demo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "LAN-only macOS remote screen view and control demo.",
+  "description": "LAN-only macOS remote screen view and control (ScreenCaptureKit streaming + browser client).",
   "type": "module",
   "scripts": {
-    "build:native": "mkdir -p .build && swiftc native/control.swift -o .build/control && swiftc native/permission_guide.swift -o .build/permission-guide -framework AppKit -framework ApplicationServices",
+    "build:native": "mkdir -p .build && swiftc native/agent.swift -o .build/agent -framework AppKit -framework ApplicationServices -framework ScreenCaptureKit -framework CoreMedia -framework VideoToolbox && swiftc native/permission_guide.swift -o .build/permission-guide -framework AppKit -framework ApplicationServices",
     "bg": "./remote.sh start",
     "guide": "./remote.sh guide",
     "stop": "./remote.sh stop",
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
+    "qrcode-terminal": "^0.12.0",
     "ws": "^8.21.0"
   },
   "engines": {
