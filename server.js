@@ -6,7 +6,6 @@
 // 守护进程负责 ScreenCaptureKit 采集与 CGEvent 输入注入；
 // 本服务负责鉴权、帧分发（带背压丢帧）、控制消息顺序转发与守护进程生命周期管理。
 
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -16,16 +15,15 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
 import { WebSocketServer } from 'ws';
+import { loadConfig } from './lib/config.js';
+import { extractAccessToken, generateAccessToken, isSameHostOrigin, tokensMatch } from './lib/security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------- 配置 ----------
 
-const HOST = process.env.HOST || '0.0.0.0';
-const PORT = Number(process.env.PORT || 8787);
-const FPS = Math.min(30, Math.max(1, Number(process.env.FPS || 15)));
-const QUALITY = Math.min(0.95, Math.max(0.2, Number(process.env.QUALITY || 0.6)));
-const MAX_WIDTH = Math.min(3840, Math.max(640, Number(process.env.MAX_WIDTH || 1920)));
+const config = loadConfig();
+const { host: HOST, port: PORT, fps: FPS, quality: QUALITY, maxWidth: MAX_WIDTH, maxClients: MAX_CLIENTS } = config;
 const AGENT_BIN = path.join(__dirname, '.build', 'agent');
 const PERMISSION_GUIDE_BIN = path.join(__dirname, '.build', 'permission-guide');
 const RUN_DIR = path.join(__dirname, '.run');
@@ -40,11 +38,14 @@ async function loadToken() {
   if (process.env.REMOTE_TOKEN) return process.env.REMOTE_TOKEN;
   try {
     const saved = (await fs.readFile(TOKEN_FILE, 'utf8')).trim();
-    if (saved) return saved;
+    if (/^[a-f0-9]{64}$/i.test(saved)) {
+      await fs.chmod(TOKEN_FILE, 0o600);
+      return saved;
+    }
   } catch {
     // 文件不存在则走生成逻辑
   }
-  const generated = crypto.randomBytes(8).toString('hex');
+  const generated = generateAccessToken();
   await fs.mkdir(RUN_DIR, { recursive: true });
   await fs.writeFile(TOKEN_FILE, `${generated}\n`, { mode: 0o600 });
   return generated;
@@ -61,6 +62,8 @@ let agentStdoutBuffer = Buffer.alloc(0);
 let lastFrame = null;
 let lastAgentStatus = null;
 let lastAgentError = null;
+let agentRestartTimer = null;
+let shuttingDown = false;
 const statusWaiters = new Set();
 
 function spawnAgent() {
@@ -106,10 +109,11 @@ function spawnAgent() {
   agent.on('exit', (code, signal) => {
     agentAlive = false;
     lastAgentError = `agent exited (code=${code}, signal=${signal})`;
+    if (shuttingDown) return;
     console.error(`${lastAgentError}, restarting in ${agentRestartDelay}ms`);
     broadcastJson(statusPayload());
     // 指数退避重启，防止持续崩溃时空转
-    setTimeout(() => {
+    agentRestartTimer = setTimeout(() => {
       agentRestartDelay = Math.min(10_000, agentRestartDelay * 2);
       spawnAgent();
     }, agentRestartDelay);
@@ -182,20 +186,24 @@ const clients = new Set();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '20kb' }));
 
-function hasValidToken(rawUrl) {
-  try {
-    const url = new URL(rawUrl, `http://${HOST}:${PORT}`);
-    const provided = url.searchParams.get('token') || '';
-    const expected = Buffer.from(TOKEN);
-    const actual = Buffer.from(provided);
-    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
+app.use((_req, res, next) => {
+  res.set({
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  });
+  next();
+});
+
+function hasValidToken(rawUrl, authorization = '') {
+  return tokensMatch(extractAccessToken(rawUrl, authorization), TOKEN);
 }
 
 function requireToken(req, res, next) {
-  if (!hasValidToken(req.originalUrl || req.url)) {
+  if (!hasValidToken(req.originalUrl || req.url, req.get('authorization'))) {
     res.status(401).type('text/plain').send('Unauthorized: missing or invalid token.');
     return;
   }
@@ -359,13 +367,25 @@ app.post('/api/permissions/guide', requireToken, async (req, res) => {
 
 app.use('/public', express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
 
-app.get('/', requireToken, (_req, res) => {
+// 控制台外壳不包含屏幕数据；开放静态页面使浏览器清理地址栏 token 后仍可刷新。
+// 所有状态、控制与画面通道仍强制鉴权。
+app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 server.on('upgrade', (req, socket, head) => {
-  if (!hasValidToken(req.url || '')) {
+  if (!isSameHostOrigin(req.headers.origin, req.headers.host)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  if (!hasValidToken(req.url || '', req.headers.authorization)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  if (clients.size >= MAX_CLIENTS) {
+    socket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n');
     socket.destroy();
     return;
   }
@@ -423,14 +443,18 @@ function lanAddresses() {
   return result;
 }
 
-process.on('exit', () => {
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (agentRestartTimer) clearTimeout(agentRestartTimer);
+  for (const ws of clients) ws.close(1001, 'Server shutting down');
   agent?.kill();
-});
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+
 for (const signalName of ['SIGINT', 'SIGTERM']) {
-  process.on(signalName, () => {
-    agent?.kill();
-    process.exit(0);
-  });
+  process.on(signalName, shutdown);
 }
 
 try {

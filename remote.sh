@@ -13,11 +13,11 @@ case "$command" in
     echo "Opening permission guide..."
     "$APP_DIR/.build/permission-guide" "$(command -v node)" "$APP_DIR/.build/agent" "$APP_DIR" >/dev/null 2>&1 &
     ;;
-  start | stop | restart | status | logs)
+  start | stop | restart | status | logs | doctor | uninstall)
     exec "$APP_DIR/start.sh" "$@"
     ;;
   *)
-    echo "Usage: $0 [start|stop|restart|status|logs|guide]"
+    echo "Usage: $0 [start|stop|restart|status|logs|doctor|uninstall|guide]"
     exit 2
     ;;
 esac

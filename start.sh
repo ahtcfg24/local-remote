@@ -2,8 +2,8 @@
 # local_remote 一键本地启动脚本(系统 service)
 #
 # 默认行为(start):
-#   1. 生成/更新当前项目的 launchd 或 systemd user service
-#   2. 启用 service 自启动(macOS 为用户登录后自启,Linux 会尝试启用 linger)
+#   1. 生成/更新当前项目的 macOS launchd user service
+#   2. 启用用户登录后自启动
 #   3. npm install 安装依赖,构建 native Swift helper
 #   4. 停止已有实例并检查端口占用
 #   5. 通过 service 启动前台进程,并轮询 /health 确认就绪
@@ -14,6 +14,8 @@
 #   ./start.sh stop               停止当前 service 实例(自启配置保留)
 #   ./start.sh status             查看 service 运行状态
 #   ./start.sh restart [参数]     重启 service
+#   ./start.sh doctor             检查运行环境与本地安装状态
+#   ./start.sh uninstall          停止服务并移除 launchd 配置（保留 token 和日志）
 #   ./start.sh run [启动参数...]  内部前台入口,供 service manager 调用
 
 set -euo pipefail
@@ -26,15 +28,15 @@ LOG_FILE="$RUN_DIR/local-remote.log"
 RUNNER_FILE="$RUN_DIR/local-remote-service-runner.sh"
 SERVICE_ID="$(printf '%s' "$ROOT_DIR" | cksum | awk '{print $1}')"
 SERVICE_LABEL="com.local-remote.$SERVICE_ID"
-SERVICE_UNIT="local-remote-$SERVICE_ID.service"
-# 用于命令行匹配的进程特征(杀掉历史实例)
-PROC_PATTERN="local-remote-control-demo"
 
 # 默认环境变量(可由 shell 环境覆盖)
 # REMOTE_TOKEN 留空时由 server.js 自动生成随机 token 并持久化到 .run/token
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8787}"
 FPS="${FPS:-15}"
+QUALITY="${QUALITY:-0.6}"
+MAX_WIDTH="${MAX_WIDTH:-1920}"
+MAX_CLIENTS="${MAX_CLIENTS:-4}"
 REMOTE_TOKEN="${REMOTE_TOKEN:-}"
 
 # --- 加载 .env ---
@@ -66,10 +68,6 @@ kill_existing() {
       kill -9 "$oldpid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
-  fi
-  # 2) 兜底: 按命令行特征清理可能的残留实例
-  if command -v pkill >/dev/null 2>&1; then
-    pkill -f "$PROC_PATTERN" 2>/dev/null || true
   fi
 }
 
@@ -126,7 +124,9 @@ ensure_dependencies() {
 
 # --- 构建 native Swift helper ---
 ensure_native_built() {
-  if [ -x .build/agent ] && [ -x .build/permission-guide ]; then
+  if [ -x .build/agent ] && [ -x .build/permission-guide ] \
+    && [ ! native/agent.swift -nt .build/agent ] \
+    && [ ! native/permission_guide.swift -nt .build/permission-guide ]; then
     return
   fi
 
@@ -146,6 +146,9 @@ prepare_runtime() {
   HOST="${HOST:-0.0.0.0}"
   PORT="${PORT:-8787}"
   FPS="${FPS:-15}"
+  QUALITY="${QUALITY:-0.6}"
+  MAX_WIDTH="${MAX_WIDTH:-1920}"
+  MAX_CLIENTS="${MAX_CLIENTS:-4}"
   REMOTE_TOKEN="${REMOTE_TOKEN:-}"
 
   # 端口选择
@@ -165,26 +168,15 @@ prepare_runtime() {
 
 # --- 识别当前系统可用的 service manager ---
 detect_service_backend() {
-  case "$(uname -s)" in
-    Darwin)
-      if ! command -v launchctl >/dev/null 2>&1; then
-        echo "[start] 错误: 当前系统未找到 launchctl" >&2
-        exit 1
-      fi
-      echo "launchd"
-      ;;
-    Linux)
-      if ! command -v systemctl >/dev/null 2>&1; then
-        echo "[start] 错误: 当前系统未找到 systemctl" >&2
-        exit 1
-      fi
-      echo "systemd"
-      ;;
-    *)
-      echo "[start] 错误: 当前系统暂不支持自动 service 启动" >&2
-      exit 1
-      ;;
-  esac
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo "[start] 错误: local_remote 的原生采集与控制组件目前仅支持 macOS 13+" >&2
+    exit 1
+  fi
+  if ! command -v launchctl >/dev/null 2>&1; then
+    echo "[start] 错误: 当前系统未找到 launchctl" >&2
+    exit 1
+  fi
+  echo "launchd"
 }
 
 # --- 为 launchd plist 转义 XML 文本 ---
@@ -195,14 +187,6 @@ xml_escape() {
   value="${value//>/&gt;}"
   value="${value//\"/&quot;}"
   value="${value//\'/&apos;}"
-  printf '%s' "$value"
-}
-
-# --- 为 systemd unit 的带引号字段转义 ---
-systemd_escape_value() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
   printf '%s' "$value"
 }
 
@@ -218,10 +202,6 @@ launchd_plist_path() {
   echo "$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 }
 
-systemd_unit_path() {
-  echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_UNIT"
-}
-
 # --- 写入 service 调用的前台 runner ---
 write_service_runner() {
   local node_bin
@@ -235,6 +215,9 @@ write_service_runner() {
     printf 'export HOST=%q\n' "$HOST"
     printf 'export PORT=%q\n' "$PORT"
     printf 'export FPS=%q\n' "$FPS"
+    printf 'export QUALITY=%q\n' "$QUALITY"
+    printf 'export MAX_WIDTH=%q\n' "$MAX_WIDTH"
+    printf 'export MAX_CLIENTS=%q\n' "$MAX_CLIENTS"
     # token 为空时不导出,让 server.js 自动生成随机 token
     if [ -n "$REMOTE_TOKEN" ]; then
       printf 'export REMOTE_TOKEN=%q\n' "$REMOTE_TOKEN"
@@ -288,6 +271,12 @@ install_launchd_service() {
     <string>$(xml_escape "$PORT")</string>
     <key>FPS</key>
     <string>$(xml_escape "$FPS")</string>
+    <key>QUALITY</key>
+    <string>$(xml_escape "$QUALITY")</string>
+    <key>MAX_WIDTH</key>
+    <string>$(xml_escape "$MAX_WIDTH")</string>
+    <key>MAX_CLIENTS</key>
+    <string>$(xml_escape "$MAX_CLIENTS")</string>
 $token_xml
   </dict>
   <key>StandardOutPath</key>
@@ -299,96 +288,21 @@ $token_xml
 EOF
 }
 
-# --- 写入 Linux systemd user service 配置 ---
-install_systemd_service() {
-  local unit token_env=""
-  unit="$(systemd_unit_path)"
-  mkdir -p "$(dirname "$unit")"
-
-  if [ -n "$REMOTE_TOKEN" ]; then
-    token_env="Environment=\"REMOTE_TOKEN=$(systemd_escape_value "$REMOTE_TOKEN")\""
-  fi
-
-  cat > "$unit" <<EOF
-[Unit]
-Description=local_remote control demo ($ROOT_DIR)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory="$(systemd_escape_value "$ROOT_DIR")"
-ExecStart=/bin/bash "$(systemd_escape_value "$ROOT_DIR/$RUNNER_FILE")"
-Restart=always
-RestartSec=3
-Environment="HOST=$(systemd_escape_value "$HOST")"
-Environment="PORT=$(systemd_escape_value "$PORT")"
-Environment="FPS=$(systemd_escape_value "$FPS")"
-$token_env
-
-[Install]
-WantedBy=default.target
-EOF
-
-  systemctl --user daemon-reload
-}
-
-# --- Linux 用户服务需要 linger 才能在无登录会话时随系统启动 ---
-enable_systemd_linger() {
-  if ! command -v loginctl >/dev/null 2>&1 || [ -z "${USER:-}" ]; then
-    return
-  fi
-
-  if loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q "Linger=no"; then
-    if loginctl enable-linger "$USER" >/dev/null 2>&1; then
-      echo "[start] 已为用户 $USER 启用 systemd linger"
-    else
-      echo "[start] 警告: 无法自动启用 systemd linger;重启后可能需要登录用户会话才会启动" >&2
-    fi
-  fi
-}
-
 # --- 根据系统类型安装或更新 service 文件 ---
 install_service() {
-  local backend="$1"
-  case "$backend" in
-    launchd)
-      install_launchd_service
-      ;;
-    systemd)
-      install_systemd_service
-      ;;
-  esac
+  install_launchd_service
 }
 
 # --- 停止当前 service 实例,但保留自启动配置 ---
 stop_service_backend() {
-  local backend="$1"
-  case "$backend" in
-    launchd)
-      launchctl bootout "$(launchd_target)" >/dev/null 2>&1 || true
-      ;;
-    systemd)
-      systemctl --user stop "$SERVICE_UNIT" >/dev/null 2>&1 || true
-      ;;
-  esac
+  launchctl bootout "$(launchd_target)" >/dev/null 2>&1 || true
 }
 
 # --- 启动并启用 service 自启动 ---
 start_service_backend() {
-  local backend="$1"
-  case "$backend" in
-    launchd)
-      launchctl bootstrap "$(launchd_domain)" "$(launchd_plist_path)"
-      launchctl enable "$(launchd_target)" >/dev/null 2>&1 || true
-      launchctl kickstart -k "$(launchd_target)" >/dev/null 2>&1 || true
-      ;;
-    systemd)
-      systemctl --user enable "$SERVICE_UNIT" >/dev/null
-      enable_systemd_linger
-      systemctl --user restart "$SERVICE_UNIT"
-      ;;
-  esac
+  launchctl bootstrap "$(launchd_domain)" "$(launchd_plist_path)"
+  launchctl enable "$(launchd_target)" >/dev/null 2>&1 || true
+  launchctl kickstart -k "$(launchd_target)" >/dev/null 2>&1 || true
 }
 
 # --- 有效 token: 环境变量优先,否则读取 server.js 生成的持久化 token ---
@@ -478,30 +392,15 @@ status_managed_service() {
   local backend
   backend="$(detect_service_backend)"
 
-  case "$backend" in
-    launchd)
-      if launchctl print "$(launchd_target)" >/dev/null 2>&1; then
-        if launchctl print "$(launchd_target)" 2>/dev/null | grep -q "state = running"; then
-          echo "[start] service 运行中 ($SERVICE_LABEL)"
-          echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
-          return 0
-        fi
-        echo "[start] service 已安装但当前未运行 ($SERVICE_LABEL)"
-        return 1
-      fi
-      ;;
-    systemd)
-      if systemctl --user is-active --quiet "$SERVICE_UNIT"; then
-        echo "[start] service 运行中 ($SERVICE_UNIT)"
-        echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
-        return 0
-      fi
-      if systemctl --user is-enabled --quiet "$SERVICE_UNIT" 2>/dev/null; then
-        echo "[start] service 已启用但当前未运行 ($SERVICE_UNIT)"
-        return 1
-      fi
-      ;;
-  esac
+  if launchctl print "$(launchd_target)" >/dev/null 2>&1; then
+    if launchctl print "$(launchd_target)" 2>/dev/null | grep -q "state = running"; then
+      echo "[start] service 运行中 ($SERVICE_LABEL)"
+      echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
+      return 0
+    fi
+    echo "[start] service 已安装但当前未运行 ($SERVICE_LABEL)"
+    return 1
+  fi
 
   if legacy_status; then
     return 0
@@ -509,6 +408,40 @@ status_managed_service() {
 
   echo "[start] 未运行"
   return 1
+}
+
+doctor() {
+  local failed=0
+  echo "[doctor] local_remote 环境检查"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "[ok] macOS $(sw_vers -productVersion)"
+  else
+    echo "[fail] 当前系统不是 macOS" >&2
+    failed=1
+  fi
+  for command_name in node npm swiftc launchctl curl; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      echo "[ok] $command_name: $(command -v "$command_name")"
+    else
+      echo "[fail] 缺少 $command_name" >&2
+      failed=1
+    fi
+  done
+  if command -v node >/dev/null 2>&1 && [ "$(node --version | sed 's/^v//' | cut -d. -f1)" -lt 20 ]; then
+    echo "[fail] Node.js 版本低于 20: $(node --version)" >&2
+    failed=1
+  fi
+  [ -x .build/agent ] && echo "[ok] 原生 agent 已构建" || echo "[info] 原生 agent 尚未构建，首次启动会自动构建"
+  [ -f "$RUN_DIR/token" ] && echo "[ok] 访问 token 已生成" || echo "[info] 访问 token 将在首次启动时生成"
+  return "$failed"
+}
+
+uninstall_service() {
+  detect_service_backend >/dev/null
+  stop_service_backend launchd
+  kill_existing
+  rm -f "$(launchd_plist_path)" "$RUNNER_FILE" "$PID_FILE"
+  echo "[start] 已卸载 launchd service；访问 token 与日志仍保留在 $RUN_DIR"
 }
 
 # --- service manager 调用的前台入口 ---
@@ -529,6 +462,12 @@ case "${1:-}" in
     mkdir -p "$RUN_DIR"
     touch "$LOG_FILE"
     tail -n "${LINES:-80}" -f "$LOG_FILE"
+    ;;
+  doctor)
+    doctor
+    ;;
+  uninstall)
+    uninstall_service
     ;;
   restart)
     shift

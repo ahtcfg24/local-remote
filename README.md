@@ -1,106 +1,139 @@
-# Local Remote Control
+# Local Remote
 
-局域网内用浏览器（尤其是手机浏览器）查看并控制本机 macOS 的轻量工具。控制端零安装，打开带 token 的网页即可使用。
+[中文](README.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-## 架构
+An open-source, mobile-first remote control for macOS on a trusted local network. View and control your Mac from Safari, Chrome, or another modern browser—nothing needs to be installed on the phone.
 
-```
-浏览器(手机/电脑) <—WebSocket(JPEG 帧 / JSON 控制)—> Node 服务(server.js) <—stdin/stdout—> .build/agent 常驻守护进程
-```
+> Local Remote is intentionally LAN-only. It has no TLS or account system. Never expose its port to the public internet.
 
-- `native/agent.swift`：常驻守护进程，用 ScreenCaptureKit 持续采集主屏幕并编码 JPEG（仅画面变化时产帧），同时在进程内注入 CGEvent 鼠标/键盘事件，保证输入顺序与低延迟。
-- `server.js`：管理守护进程生命周期（崩溃自动重启）、帧分发（慢速客户端自动丢帧防积压）、token 鉴权、终端二维码。
-- `public/`：纯浏览器控制端，针对移动端触控做了专门交互设计。
+## Why Local Remote?
 
-## 功能
+- **Phone-first control:** trackpad and direct-touch modes, drag, right-click, inertial scrolling, pinch-to-zoom, landscape view, and fullscreen.
+- **Useful keyboard support:** Chinese and other IME text, modifier keys, navigation keys, long text, and common macOS shortcuts.
+- **Low-latency native capture:** ScreenCaptureKit streams changed frames while CGEvent handles ordered mouse and keyboard input.
+- **Zero-install client:** scan the terminal QR code and use the browser already on your phone.
+- **Local and transparent:** no cloud relay, analytics, account, or third-party runtime service.
+- **Managed on macOS:** one command installs a per-user launchd service with login startup and crash recovery.
 
-- 实时屏幕画面：默认 15 FPS（可调 1-30），画面无变化时不耗带宽。
-- 完整鼠标控制：移动、左/中/右键、真双击（clickState）、拖拽、滚轮、修饰键+点击（⌘/⇧/⌥/⌃ + 单击）。
-- 完整键盘控制：文本输入（含中文）、组合快捷键、F1-F12、方向键等。
-- 移动端触控板模式：单指移动光标（速度自适应加速度）、轻点左击（零延迟，双击自动识别为真双击）、双击后按住拖拽、两指滚动（带惯性）、两指轻点右键、长按右键（带充能环提示）、捏合缩放视图；画布外黑边同样是有效触控板区域。
-- 移动端直触模式：轻点位置点击、按住 0.3 秒后移动为拖拽、按住不动 0.5 秒右键。
-- 键盘抽屉：中文输入法实时输入（前后缀差分同步，批量删除/移位合并为单条连发命令）、长文本区整段发送（按码点自动分片不截断、字数统计、⌘/Ctrl+Enter 快捷发送）、⌘⌃⌥⇧ 修饰键组合、⌫/方向键长按连发、常用键与系统快捷键（⌘Space/⌘Tab/截屏等）、可精简收起扩展行；抽屉自动抬到系统键盘上方（visualViewport）。
-- 发送文本反馈真实可信：未连接或远程控制停用时明确提示发送失败，不再误报"已发送"。
-- 视图操作：缩放、平移（带常驻退出提示条）、横屏旋转、沉浸全屏（整页真全屏，底部快捷栏与键盘抽屉在全屏下依然可用）；缩放后光标贴边时视图自动跟随。
-- 移动端体验：画面顶部对齐、视图工具条与快捷栏集中在底部拇指区、轻点涟漪与操作 toast 反馈、断线遮罩与立即重连、切后台回来秒重连（含僵尸连接探活）、屏幕保活（Wake Lock / 内联视频兜底）、首次访问手势引导。
-- 终端打印二维码，手机扫码直达控制台。
-- 随机 token 鉴权：未设置 `REMOTE_TOKEN` 时自动生成随机 token 并持久化到 `.run/token`。
+## Requirements
 
-## 启动
+- macOS 13 or newer
+- Node.js 20 or newer
+- A phone or computer on the same trusted LAN
+- Screen Recording and Accessibility permissions on the Mac
+
+## Quick start
 
 ```bash
-npm install
-npm start
+git clone https://github.com/ahtcfg24/local-remote.git
+cd local-remote
+./start.sh
 ```
 
-终端会打印控制台地址和二维码：
+The script installs dependencies, builds the native helpers, starts a launchd user service, and prints access URLs. Scan the QR code shown in the log or open a printed URL such as:
 
 ```text
-LAN URL: http://192.168.x.x:8787/?token=<自动生成或指定的token>
+http://192.168.1.8:8787/?token=<generated-secret>
 ```
 
-同一局域网内的浏览器打开该地址（或手机扫码）即可。
+The random 256-bit token persists in `.run/token` with owner-only permissions. After loading, the browser keeps it in session storage and removes it from the visible address bar. Use **Copy link** when you intentionally need the complete access URL.
 
-后台 service 启动（登录自启、崩溃自动重启）：
+### macOS permissions
 
-```bash
-./start.sh          # 安装/启动 launchd service
-./start.sh status   # 查看状态
-./start.sh stop     # 停止
-./start.sh restart  # 重启
-./start.sh logs     # 查看日志
-```
+Local Remote needs:
 
-`./remote.sh` 是兼容入口，除 `guide` 外全部转发到 `start.sh`。也可以用 `npm run bg / status / stop / restart / logs`。
+- **Screen Recording** to capture the main display.
+- **Accessibility** to inject mouse and keyboard events.
 
-## macOS 权限
-
-依赖两项系统权限（授权对象为实际启动服务的进程链，如终端 / node / agent）：
-
-- 屏幕录制：供 ScreenCaptureKit 采集画面。
-- 辅助功能：供 agent 注入鼠标键盘事件。
-
-页面提示待授权时，点击网页右上角"授权引导"，或运行：
+Select **Permission guide** in the web app or run:
 
 ```bash
 ./remote.sh guide
 ```
 
-引导弹窗会打开对应设置页，并提供可拖拽的 `node` 和 `agent` 授权项。授权屏幕录制后需重启服务（agent 会每 5 秒自动重试采集，若仍失败请重启）。
+After granting Screen Recording, restart the service if capture does not begin automatically.
 
-## 可配置环境变量
+## Service commands
 
 ```bash
-HOST=0.0.0.0 PORT=8787 FPS=15 QUALITY=0.6 MAX_WIDTH=1920 REMOTE_TOKEN=your-token npm start
+./start.sh             # install or update, then start
+./start.sh status      # show service state and local access URL
+./start.sh restart     # rebuild configuration and restart
+./start.sh stop        # stop while keeping login startup configuration
+./start.sh logs        # follow the service log
+./start.sh doctor      # check macOS, tools, build, and token state
+./start.sh uninstall   # remove the launchd service; keep token and logs
 ```
 
-- `HOST`：监听地址，默认 `0.0.0.0`。
-- `PORT`：监听端口，默认 `8787`。
-- `FPS`：屏幕帧率，默认 `15`，范围 `1-30`。
-- `QUALITY`：JPEG 质量，默认 `0.6`，范围 `0.2-0.95`。
-- `MAX_WIDTH`：采集画面最大宽度（像素），默认 `1920`，范围 `640-3840`。
-- `REMOTE_TOKEN`：访问 token；不设置时自动生成随机值并持久化到 `.run/token`。
+`./remote.sh` remains a compatibility entry point for these commands. For foreground development, use `npm start`.
 
-## 移动端手势速查
+## Mobile controls
 
-| 手势 | 触控板模式 | 直触模式 |
+| Gesture | Trackpad mode | Direct-touch mode |
 | --- | --- | --- |
-| 单指移动 | 移动光标（带加速度） | 移动光标到触点 |
-| 轻点 | 左键单击（零延迟） | 在触点位置单击（零延迟） |
-| 快速双击 | 真双击 | 真双击 |
-| 双击后按住移动 | 拖拽 | — |
-| 按住 0.3 秒后移动 | — | 拖拽 |
-| 长按不动 0.5 秒 | 右键（有充能环提示） | 右键（有充能环提示） |
-| 两指滑动 | 滚动（松手带惯性） | 滚动（松手带惯性） |
-| 两指轻点 | 右键 | 右键 |
-| 捏合 | 缩放视图 | 缩放视图 |
+| One-finger move | Move pointer with acceleration | Move pointer to touch position |
+| Tap / double tap | Click / double-click | Click / double-click at position |
+| Double tap, hold, move | Drag | — |
+| Hold, then move | — | Drag after 0.3 seconds |
+| Long press | Right-click | Right-click |
+| Two-finger move | Inertial scroll | Inertial scroll |
+| Two-finger tap | Right-click | Right-click |
+| Pinch | Zoom remote view | Zoom remote view |
 
-首次在手机上打开会显示手势速查浮层，之后可从「视图 → 手势」再次查看。双击后按住拖拽会先落一次单击（等价于先选中再拖动，对拖文件/选文本无影响）。
+The first mobile visit displays an in-app gesture guide. The bottom dock exposes mode switching, keyboard, right-click, drag lock, and view tools.
 
-## 限制
+## Configuration
 
-- 仅用于可信局域网；没有 TLS，不要暴露到公网。
-- 移动端布局为移动优先：任何触屏浏览器默认得到移动端布局；若浏览器开启了「桌面版网页」模式，页面会按桌面视口渲染导致界面整体缩小，建议关闭该模式或使用 Chrome/Safari。
-- 只支持主屏幕。
-- 不包含账号系统、审计日志、文件传输、剪贴板同步或 NAT 穿透。
-- 需要 macOS 13+（ScreenCaptureKit）与 Node.js 20+。
+Copy `.env.example` to `.env`, or export variables before starting:
+
+```bash
+cp .env.example .env
+./start.sh restart
+```
+
+| Variable | Default | Description |
+| --- | ---: | --- |
+| `HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` to disable LAN access. |
+| `PORT` | `8787` | HTTP/WebSocket port. |
+| `FPS` | `15` | Capture frame rate, clamped to 1–30. |
+| `QUALITY` | `0.6` | JPEG quality, clamped to 0.2–0.95. |
+| `MAX_WIDTH` | `1920` | Maximum capture width, clamped to 640–3840. |
+| `MAX_CLIENTS` | `4` | Concurrent browser clients, clamped to 1–32. |
+| `REMOTE_TOKEN` | generated | Optional fixed secret; a random token is safer for most users. |
+
+## Architecture
+
+```text
+Mobile or desktop browser
+  ↕ HTTP + authenticated WebSocket (JPEG frames / JSON input)
+Node.js server (auth, backpressure, lifecycle, static client)
+  ↕ framed stdout + newline-delimited JSON stdin
+Swift agent (ScreenCaptureKit + VideoToolbox + CGEvent)
+```
+
+The server discards frames for slow clients instead of building latency. It also releases pressed mouse buttons when a browser disconnects, restarts a failed native agent with backoff, validates browser WebSocket origins, and limits concurrent clients.
+
+## Development
+
+```bash
+npm ci
+npm test
+npm run build:native
+npm start
+```
+
+CI runs the JavaScript tests and native Swift build on macOS. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before a substantial change.
+
+## Security and limitations
+
+- Use only on a trusted LAN; the token grants full view-and-control access.
+- There is no TLS, account system, audit log, clipboard sync, file transfer, NAT traversal, or cloud relay.
+- Only the main display is currently supported.
+- The host must be macOS; Linux and Windows are not supported.
+- Browser capabilities differ. Wake Lock and fullscreen may require a user gesture and behave differently on iOS.
+
+See [SECURITY.md](SECURITY.md) for the trust boundary and private reporting guidance.
+
+## License
+
+[MIT](LICENSE)

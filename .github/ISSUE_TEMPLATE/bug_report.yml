@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible Local Remote problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include access tokens, public IP addresses, screen captures with private data, or unsanitized logs.
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS, Node.js, browser, and controlling device versions
+      placeholder: macOS 15.5, Node.js 20.19, iOS 18 Safari
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include relevant `./start.sh doctor` output and sanitized logs if available.

@@ -6,7 +6,19 @@
 
 // ---------- DOM 引用 ----------
 
-const token = new URLSearchParams(window.location.search).get('token') || '';
+const tokenFromUrl = new URLSearchParams(window.location.search).get('token') || '';
+let storedToken = '';
+try {
+  storedToken = sessionStorage.getItem('localRemoteToken') || '';
+  if (tokenFromUrl) sessionStorage.setItem('localRemoteToken', tokenFromUrl);
+} catch {
+  // 某些隐私模式禁用 sessionStorage，当前页面仍可正常使用 URL 中的 token。
+}
+const token = tokenFromUrl || storedToken;
+if (tokenFromUrl && window.history?.replaceState) {
+  // 避免访问密钥长期停留在浏览器历史、截图和地址栏中。
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
+}
 const $ = (id) => document.getElementById(id);
 
 const canvas = $('screen');
@@ -193,6 +205,11 @@ function updateStatus(payload) {
 
 function connect() {
   clearTimeout(reconnectTimer);
+  if (!token) {
+    setConnection('closed', '缺少访问令牌');
+    emptyState.textContent = '访问地址无效，请重新扫描服务端二维码。';
+    return;
+  }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   // 用局部变量捕获本次连接：旧连接晚到的事件（socket !== ws）一律忽略，
   // 防止 reconnectNow 后旧 close 事件再排定重连、孤儿化新连接
@@ -1581,18 +1598,24 @@ gestureHelpBtn.addEventListener('click', openGestureGuide);
 // ---------- 其它 UI ----------
 
 copyLinkBtn.addEventListener('click', async () => {
+  const shareUrl = new URL(window.location.href);
+  shareUrl.searchParams.set('token', token);
   try {
-    await navigator.clipboard.writeText(window.location.href);
+    await navigator.clipboard.writeText(shareUrl.toString());
     notify('已复制控制台地址');
   } catch {
-    log(window.location.href);
+    log(shareUrl.toString());
   }
 });
 
+function authHeaders(extra = {}) {
+  return { ...extra, Authorization: `Bearer ${token}` };
+}
+
 async function runAuthAction(action) {
-  const response = await fetch(`/api/permissions/guide?token=${encodeURIComponent(token)}`, {
+  const response = await fetch('/api/permissions/guide', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ action }),
   });
   const payload = await response.json();
@@ -1603,7 +1626,7 @@ async function runAuthAction(action) {
 
 function openAuthModal() {
   authModal.hidden = false;
-  fetch(`/api/permissions/status?token=${encodeURIComponent(token)}`)
+  fetch('/api/permissions/status', { headers: authHeaders() })
     .then((res) => res.json())
     .then((payload) => {
       updateStatus(payload);
