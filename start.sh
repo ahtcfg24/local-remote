@@ -28,6 +28,8 @@ LOG_FILE="$RUN_DIR/local-remote.log"
 RUNNER_FILE="$RUN_DIR/local-remote-service-runner.sh"
 SERVICE_ID="$(printf '%s' "$ROOT_DIR" | cksum | awk '{print $1}')"
 SERVICE_LABEL="com.local-remote.$SERVICE_ID"
+AGENT_APP=".build/Local Remote Agent.app"
+AGENT_EXECUTABLE="$AGENT_APP/Contents/MacOS/local-remote-agent"
 
 # 默认环境变量(可由 shell 环境覆盖)
 # REMOTE_TOKEN 留空时由 server.js 自动生成随机 token 并持久化到 .run/token
@@ -124,8 +126,10 @@ ensure_dependencies() {
 
 # --- 构建 native Swift helper ---
 ensure_native_built() {
-  if [ -x .build/agent ] && [ -x .build/permission-guide ] \
-    && [ ! native/agent.swift -nt .build/agent ] \
+  if [ -x "$AGENT_EXECUTABLE" ] && [ -x .build/permission-guide ] \
+    && [ ! native/agent.swift -nt "$AGENT_EXECUTABLE" ] \
+    && [ ! native/agent-Info.plist -nt "$AGENT_EXECUTABLE" ] \
+    && [ ! scripts/build-native.sh -nt "$AGENT_EXECUTABLE" ] \
     && [ ! native/permission_guide.swift -nt .build/permission-guide ]; then
     return
   fi
@@ -202,41 +206,18 @@ launchd_plist_path() {
   echo "$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 }
 
-# --- 写入 service 调用的前台 runner ---
-write_service_runner() {
-  local node_bin
-  node_bin="$(command -v node)"
-
-  {
-    echo "#!/usr/bin/env bash"
-    echo "set -euo pipefail"
-    printf 'cd %q\n' "$ROOT_DIR"
-    # 导出环境变量供 node 进程使用
-    printf 'export HOST=%q\n' "$HOST"
-    printf 'export PORT=%q\n' "$PORT"
-    printf 'export FPS=%q\n' "$FPS"
-    printf 'export QUALITY=%q\n' "$QUALITY"
-    printf 'export MAX_WIDTH=%q\n' "$MAX_WIDTH"
-    printf 'export MAX_CLIENTS=%q\n' "$MAX_CLIENTS"
-    # token 为空时不导出,让 server.js 自动生成随机 token
-    if [ -n "$REMOTE_TOKEN" ]; then
-      printf 'export REMOTE_TOKEN=%q\n' "$REMOTE_TOKEN"
-    fi
-    printf 'exec %q server.js' "$node_bin"
-    for arg in "$@"; do
-      printf ' %q' "$arg"
-    done
-    printf ' >> %q 2>&1\n' "$ROOT_DIR/$LOG_FILE"
-  } > "$RUNNER_FILE"
-  chmod +x "$RUNNER_FILE"
-}
-
 # --- 写入 macOS LaunchAgent 配置 ---
 install_launchd_service() {
-  local plist node_bin token_xml=""
+  local plist node_bin token_xml="" arguments_xml=""
   plist="$(launchd_plist_path)"
   node_bin="$(command -v node)"
   mkdir -p "$(dirname "$plist")"
+
+  local argument
+  for argument in "$@"; do
+    arguments_xml="${arguments_xml}    <string>$(xml_escape "$argument")</string>
+"
+  done
 
   # token 为空时不写入 plist,由 server.js 自动生成
   if [ -n "$REMOTE_TOKEN" ]; then
@@ -254,8 +235,11 @@ install_launchd_service() {
   <string>$(xml_escape "$SERVICE_LABEL")</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>$(xml_escape "$ROOT_DIR/$RUNNER_FILE")</string>
+    <string>$(xml_escape "$ROOT_DIR/$AGENT_EXECUTABLE")</string>
+    <string>--service</string>
+    <string>$(xml_escape "$node_bin")</string>
+    <string>$(xml_escape "$ROOT_DIR/server.js")</string>
+$arguments_xml
   </array>
   <key>WorkingDirectory</key>
   <string>$(xml_escape "$ROOT_DIR")</string>
@@ -290,19 +274,31 @@ EOF
 
 # --- 根据系统类型安装或更新 service 文件 ---
 install_service() {
-  install_launchd_service
+  # 当前只支持 launchd；第一个参数保留 service backend 接口形状。
+  shift
+  install_launchd_service "$@"
 }
 
 # --- 停止当前 service 实例,但保留自启动配置 ---
 stop_service_backend() {
-  launchctl bootout "$(launchd_target)" >/dev/null 2>&1 || true
+  local target
+  target="$(launchd_target)"
+  launchctl bootout "$target" >/dev/null 2>&1 || true
+
+  # bootout 是异步的；立即 bootstrap 偶尔会返回 I/O error (5)。
+  for _ in $(seq 1 30); do
+    if ! launchctl print "$target" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.1
+  done
 }
 
 # --- 启动并启用 service 自启动 ---
 start_service_backend() {
   launchctl bootstrap "$(launchd_domain)" "$(launchd_plist_path)"
   launchctl enable "$(launchd_target)" >/dev/null 2>&1 || true
-  launchctl kickstart -k "$(launchd_target)" >/dev/null 2>&1 || true
+  launchctl kickstart "$(launchd_target)" >/dev/null 2>&1 || true
 }
 
 # --- 有效 token: 环境变量优先,否则读取 server.js 生成的持久化 token ---
@@ -368,8 +364,7 @@ start_managed_service() {
   backend="$(detect_service_backend)"
 
   prepare_runtime
-  write_service_runner "$@"
-  install_service "$backend"
+  install_service "$backend" "$@"
   stop_service_backend "$backend"
   kill_existing
 
@@ -431,7 +426,7 @@ doctor() {
     echo "[fail] Node.js 版本低于 20: $(node --version)" >&2
     failed=1
   fi
-  [ -x .build/agent ] && echo "[ok] 原生 agent 已构建" || echo "[info] 原生 agent 尚未构建，首次启动会自动构建"
+  [ -x "$AGENT_EXECUTABLE" ] && echo "[ok] 原生 agent app 已构建" || echo "[info] 原生 agent app 尚未构建，首次启动会自动构建"
   [ -f "$RUN_DIR/token" ] && echo "[ok] 访问 token 已生成" || echo "[info] 访问 token 将在首次启动时生成"
   return "$failed"
 }

@@ -24,10 +24,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const config = loadConfig();
 const { host: HOST, port: PORT, fps: FPS, quality: QUALITY, maxWidth: MAX_WIDTH, maxClients: MAX_CLIENTS } = config;
-const AGENT_BIN = path.join(__dirname, '.build', 'agent');
+const AGENT_APP = path.join(__dirname, '.build', 'Local Remote Agent.app');
+const AGENT_BIN = path.join(AGENT_APP, 'Contents', 'MacOS', 'local-remote-agent');
 const PERMISSION_GUIDE_BIN = path.join(__dirname, '.build', 'permission-guide');
 const RUN_DIR = path.join(__dirname, '.run');
 const TOKEN_FILE = path.join(RUN_DIR, 'token');
+const PERMISSION_STATUS_FILE = path.join(RUN_DIR, 'agent-permissions.json');
 const MAX_TEXT_LENGTH = 2000;
 // 客户端积压超过该值时丢帧，避免慢速网络下延迟无限累积
 const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
@@ -141,6 +143,13 @@ function handleAgentJson(text) {
     lastAgentStatus = payload;
     lastAgentError = null;
     agentRestartDelay = 1000;
+    fs.writeFile(PERMISSION_STATUS_FILE, `${JSON.stringify({
+      screenRecording: Boolean(payload.screenRecording),
+      accessibilityTrusted: Boolean(payload.accessibilityTrusted),
+      updatedAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 }).catch((error) => {
+      console.error(`[agent] failed to persist permission status: ${error.message}`);
+    });
     for (const waiter of statusWaiters) waiter(payload);
     statusWaiters.clear();
     broadcastJson(statusPayload());
@@ -345,7 +354,7 @@ app.post('/api/permissions/guide', requireToken, async (req, res) => {
   try {
     if (action === 'open_guide') {
       await fs.access(PERMISSION_GUIDE_BIN);
-      launchDetached(PERMISSION_GUIDE_BIN, [process.execPath, AGENT_BIN, __dirname]);
+      launchDetached(PERMISSION_GUIDE_BIN, [AGENT_APP, __dirname]);
     } else if (action === 'open_screen_settings') {
       await openSettingsPane('screen');
     } else if (action === 'open_accessibility_settings') {

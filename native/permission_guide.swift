@@ -80,15 +80,13 @@ final class DraggableFileTile: NSView, NSDraggingSource {
 }
 
 final class PermissionGuideApp: NSObject, NSApplicationDelegate {
-    private let nodePath: String
-    private let controlPath: String
+    private let agentAppPath: String
     private let appDir: String
     private var window: NSWindow?
     private let statusLabel = NSTextField(labelWithString: "正在检测权限...")
 
-    init(nodePath: String, controlPath: String, appDir: String) {
-        self.nodePath = nodePath
-        self.controlPath = controlPath
+    init(agentAppPath: String, appDir: String) {
+        self.agentAppPath = agentAppPath
         self.appDir = appDir
     }
 
@@ -118,7 +116,7 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
         title.lineBreakMode = .byWordWrapping
         title.maximumNumberOfLines = 2
 
-        let intro = NSTextField(labelWithString: "点击下面按钮打开系统设置，然后把对应授权项拖进列表并打开开关。macOS 仍可能要求输入密码或重启服务。")
+        let intro = NSTextField(labelWithString: "在系统设置中为同一个 Local Remote Agent 打开两项权限。点击按钮可直达对应页面，也可以把下面的 App 卡片拖进列表。")
         intro.font = .systemFont(ofSize: 13)
         intro.textColor = .secondaryLabelColor
         intro.lineBreakMode = .byWordWrapping
@@ -131,31 +129,19 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
 
         let screenTile = DraggableFileTile(
             title: "拖到“屏幕录制”",
-            subtitle: nodePath,
-            fileURL: URL(fileURLWithPath: nodePath)
+            subtitle: agentAppPath,
+            fileURL: URL(fileURLWithPath: agentAppPath)
         )
 
         let accessTile = DraggableFileTile(
             title: "拖到“辅助功能”",
-            subtitle: controlPath,
-            fileURL: URL(fileURLWithPath: controlPath)
+            subtitle: agentAppPath,
+            fileURL: URL(fileURLWithPath: agentAppPath)
         )
 
         let openScreenButton = button("打开屏幕录制设置", action: #selector(openScreenRecordingSettings))
         let openAccessibilityButton = button("打开辅助功能设置", action: #selector(openAccessibilitySettings))
-        let triggerScreenButton = button("触发录屏请求", action: #selector(triggerScreenRecording))
-        let triggerAccessibilityButton = button("触发控制请求", action: #selector(triggerAccessibility))
         let refreshButton = button("重新检测", action: #selector(refreshStatusAction))
-
-        let screenButtons = NSStackView(views: [openScreenButton, triggerScreenButton])
-        screenButtons.orientation = .horizontal
-        screenButtons.distribution = .fillEqually
-        screenButtons.spacing = 8
-
-        let accessButtons = NSStackView(views: [openAccessibilityButton, triggerAccessibilityButton])
-        accessButtons.orientation = .horizontal
-        accessButtons.distribution = .fillEqually
-        accessButtons.spacing = 8
 
         let stack = NSStackView(views: [
             title,
@@ -163,10 +149,10 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
             separator(),
             label("1. 屏幕录制"),
             screenTile,
-            screenButtons,
+            openScreenButton,
             label("2. 辅助功能"),
             accessTile,
-            accessButtons,
+            openAccessibilityButton,
             separator(),
             statusLabel,
             refreshButton
@@ -218,26 +204,6 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
         openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
-    @objc private func triggerScreenRecording() {
-        let target = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("local-remote-permission-test.jpg")
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        task.arguments = ["-x", "-t", "jpg", target.path]
-        try? task.run()
-        task.waitUntilExit()
-        try? FileManager.default.removeItem(at: target)
-        refreshStatus()
-    }
-
-    @objc private func triggerAccessibility() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: controlPath)
-        task.arguments = ["prompt-accessibility"]
-        try? task.run()
-        task.waitUntilExit()
-        refreshStatus()
-    }
-
     @objc private func refreshStatusAction() {
         refreshStatus()
     }
@@ -248,48 +214,27 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatus() {
-        let accessibility = controlInfo().contains("\"accessibilityTrusted\":true")
-        let screen = screenCaptureWorks()
-        statusLabel.stringValue = "屏幕录制：\(screen ? "已就绪" : "待授权")    辅助功能：\(accessibility ? "已就绪" : "待授权")\n完成授权后运行：cd \(appDir) && ./remote.sh restart"
+        let status = persistedAgentStatus()
+        let accessibility = status?["accessibilityTrusted"] as? Bool ?? false
+        let screen = status?["screenRecording"] as? Bool ?? false
+        statusLabel.stringValue = "常驻进程状态 — 屏幕录制：\(screen ? "已就绪" : "待授权")    辅助功能：\(accessibility ? "已就绪" : "待授权")\n打开权限后点“重新检测”；若录屏仍未恢复，运行：cd \(appDir) && ./remote.sh restart"
     }
 
-    private func controlInfo() -> String {
-        let pipe = Pipe()
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: controlPath)
-        task.arguments = ["info"]
-        task.standardOutput = pipe
+    private func persistedAgentStatus() -> [String: Any]? {
+        let url = URL(fileURLWithPath: appDir).appendingPathComponent(".run/agent-permissions.json")
         do {
-            try task.run()
-            task.waitUntilExit()
-            return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let data = try Data(contentsOf: url)
+            return try JSONSerialization.jsonObject(with: data) as? [String: Any]
         } catch {
-            return ""
-        }
-    }
-
-    private func screenCaptureWorks() -> Bool {
-        let target = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("local-remote-permission-check.jpg")
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        task.arguments = ["-x", "-t", "jpg", target.path]
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let exists = FileManager.default.fileExists(atPath: target.path)
-            try? FileManager.default.removeItem(at: target)
-            return task.terminationStatus == 0 && exists
-        } catch {
-            return false
+            return nil
         }
     }
 }
 
-let nodePath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/usr/local/bin/node"
-let controlPath = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "./.build/control"
-let appDir = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : FileManager.default.currentDirectoryPath
+let agentAppPath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "./.build/Local Remote Agent.app"
+let appDir = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : FileManager.default.currentDirectoryPath
 let app = NSApplication.shared
-let delegate = PermissionGuideApp(nodePath: nodePath, controlPath: controlPath, appDir: appDir)
+let delegate = PermissionGuideApp(agentAppPath: agentAppPath, appDir: appDir)
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

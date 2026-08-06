@@ -16,6 +16,6 @@
 
 ## 架构要点
 
-- `native/agent.swift`：常驻守护进程（ScreenCaptureKit 推流 + CGEvent 输入注入），由 `server.js` 以子进程方式管理，通信协议见 agent.swift 头部注释。
+- `native/agent.swift`：构建为 `.build/Local Remote Agent.app`；launchd 先启动它的 service-launcher 模式，再由它托管 Node，Node 以子进程方式管理负责 ScreenCaptureKit 推流与 CGEvent 输入注入的 agent worker。这样 TCC 的 responsible process 始终是 Agent App。通信协议见 agent.swift 头部注释。
 - `REMOTE_TOKEN` 未设置时 `server.js` 自动生成 256 位随机 token 并持久化到 `.run/token`。
 - 构建原生二进制：`npm run build:native`（产物在 `.build/`）。

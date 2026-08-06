@@ -478,9 +478,56 @@ func startStdinLoop() {
 
 // MARK: - 入口
 
+func runServiceLauncher() -> Never {
+    let arguments = Array(CommandLine.arguments.dropFirst(2))
+    guard let executable = arguments.first else {
+        fputs("Usage: local-remote-agent --service <executable> [arguments...]\n", stderr)
+        exit(2)
+    }
+
+    let child = Process()
+    child.executableURL = URL(fileURLWithPath: executable)
+    child.arguments = Array(arguments.dropFirst())
+    child.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+    // launchd 只向顶层服务进程发信号。让 app bundle 保持为 TCC 的
+    // responsible process，同时把停止信号转发给 Node 完成优雅退出。
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGINT, SIG_IGN)
+    let signalQueue = DispatchQueue(label: "agent.service.signals")
+    let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
+    let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
+    terminationSource.setEventHandler { child.terminate() }
+    interruptSource.setEventHandler { child.interrupt() }
+    terminationSource.resume()
+    interruptSource.resume()
+
+    do {
+        try child.run()
+        child.waitUntilExit()
+        terminationSource.cancel()
+        interruptSource.cancel()
+        exit(child.terminationStatus)
+    } catch {
+        fputs("Failed to launch service child: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
+}
+
+if CommandLine.arguments.dropFirst().first == "--service" {
+    runServiceLauncher()
+}
+
 signal(SIGPIPE, SIG_IGN)
 CaptureManager.shared.loadEnvConfig()
 startStdinLoop()
+
+// 必须由 launchd 管理的实际常驻进程发起请求。由 Terminal 或授权引导
+// 临时拉起同一个文件时，macOS 可能按不同的 responsible process 归因。
+if !AXIsProcessTrusted() {
+    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    _ = AXIsProcessTrustedWithOptions(options)
+}
 emitStatus()
 CaptureManager.shared.restart()
 RunLoop.main.run()

@@ -51,7 +51,13 @@ Local Remote 需要：
 ./remote.sh guide
 ```
 
-授权屏幕录制后，如果采集没有自动开始，请重启服务。
+系统设置中的两项权限都应授予 **Local Remote Agent**；launchd 以该 App 作为顶层服务进程，再由它托管 Node 和控制 worker，因此授权引导、状态检测和实际控制使用同一个 TCC 责任主体。辅助功能授权会被运行中的进程自动识别。授权屏幕录制后，如果采集没有自动开始，请重启服务。
+
+源码构建默认使用本机 ad-hoc 签名，因此修改并重新编译 Swift agent 后，macOS 可能要求重新授权。如有持久的 Apple 开发者签名身份，可在构建时设置 `LOCAL_REMOTE_CODESIGN_IDENTITY`，使权限在 agent 更新后继续匹配：
+
+```bash
+LOCAL_REMOTE_CODESIGN_IDENTITY="Apple Development: ..." npm run build:native
+```
 
 ## 服务命令
 
@@ -106,7 +112,8 @@ cp .env.example .env
 ```text
 手机或电脑浏览器
   ↕ HTTP + 鉴权 WebSocket（JPEG 帧 / JSON 输入）
-Node.js 服务（鉴权、背压、生命周期、静态控制端）
+Local Remote Agent service launcher（稳定的 TCC 责任主体）
+  ↳ Node.js 服务（鉴权、背压、生命周期、静态控制端）
   ↕ stdout 帧协议 + stdin 换行 JSON
 Swift agent（ScreenCaptureKit + VideoToolbox + CGEvent）
 ```

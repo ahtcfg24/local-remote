@@ -11,7 +11,7 @@
   "bugs": "https://github.com/ahtcfg24/local-remote/issues",
   "type": "module",
   "scripts": {
-    "build:native": "mkdir -p .build && swiftc native/agent.swift -o .build/agent -framework AppKit -framework ApplicationServices -framework ScreenCaptureKit -framework CoreMedia -framework VideoToolbox && swiftc native/permission_guide.swift -o .build/permission-guide -framework AppKit -framework ApplicationServices",
+    "build:native": "./scripts/build-native.sh",
     "test": "node --test",
     "check": "npm test && npm run build:native",
     "bg": "./remote.sh start",

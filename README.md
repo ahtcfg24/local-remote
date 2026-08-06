@@ -51,7 +51,13 @@ Select **Permission guide** in the web app or run:
 ./remote.sh guide
 ```
 
-After granting Screen Recording, restart the service if capture does not begin automatically.
+Grant both permissions to **Local Remote Agent**. launchd starts that app as the top-level service process, which then supervises Node and the control worker, so the guide, status checks, and actual input injection share one TCC responsible identity. A running agent detects Accessibility changes automatically. After granting Screen Recording, restart the service if capture does not begin automatically.
+
+Local source builds use ad-hoc signing by default, so macOS may ask again after the Swift agent is changed and rebuilt. If you have a persistent Apple code-signing identity, set `LOCAL_REMOTE_CODESIGN_IDENTITY` while building so permission grants continue to match agent updates:
+
+```bash
+LOCAL_REMOTE_CODESIGN_IDENTITY="Apple Development: ..." npm run build:native
+```
 
 ## Service commands
 
@@ -106,7 +112,8 @@ cp .env.example .env
 ```text
 Mobile or desktop browser
   ↕ HTTP + authenticated WebSocket (JPEG frames / JSON input)
-Node.js server (auth, backpressure, lifecycle, static client)
+Local Remote Agent service launcher (stable TCC responsible process)
+  ↳ Node.js server (auth, backpressure, lifecycle, static client)
   ↕ framed stdout + newline-delimited JSON stdin
 Swift agent (ScreenCaptureKit + VideoToolbox + CGEvent)
 ```
