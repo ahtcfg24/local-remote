@@ -17,15 +17,17 @@
       <header class="topbar">
         <div class="topbar-title">
           <h1>局域网远程控制</h1>
-          <span class="topbar-hint">仅限可信局域网 · 无 TLS</span>
+          <span class="topbar-hint">连接到你的 Mac · 仅限可信局域网</span>
         </div>
         <div class="status-strip" aria-live="polite">
           <span id="connectionDot" class="dot" data-state="connecting"></span>
           <span id="connectionLabel">连接中</span>
           <span id="statsLabel" class="stats-label">--</span>
-          <span id="permissionLabel" class="perm-label">权限检测中</span>
+          <button id="permissionLabel" type="button" class="perm-label ghost">权限检测中</button>
         </div>
+        <button id="controlToggleBtn" type="button" class="control-toggle" aria-pressed="false">暂停控制</button>
         <div class="topbar-actions">
+          <button id="desktopKeyboardBtn" type="button" class="ghost">键盘</button>
           <button id="authGuideBtn" type="button" class="ghost">授权引导</button>
           <button id="copyLinkBtn" type="button" class="ghost">复制地址</button>
           <button id="fullscreenBtn" type="button" class="ghost">全屏</button>
@@ -37,11 +39,21 @@
         <div class="screen-wrap" id="screenWrap">
           <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
           <div id="remoteCursor" class="remote-cursor" aria-hidden="true"></div>
-          <div id="emptyState" class="empty-state">等待屏幕帧...</div>
+          <div id="emptyState" class="empty-state" role="status">正在连接 Mac…</div>
+          <button id="streamHelpBtn" class="stream-help" type="button" hidden>打开授权引导</button>
           <!-- 断线遮罩：断开后画面静止，需要显著提示与手动重连入口 -->
           <div id="connOverlay" class="conn-overlay" hidden>
-            <div class="conn-overlay-text" id="connOverlayText">连接已断开</div>
-            <button id="reconnectNowBtn" type="button">立即重连</button>
+            <div class="conn-overlay-text" id="connOverlayText" role="status">连接已断开</div>
+            <form id="accessForm" class="access-form" hidden>
+              <label for="accessInput">连接地址或密钥</label>
+              <input id="accessInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 Mac 提供的地址或密钥" required />
+              <button type="submit">连接 Mac</button>
+              <p>在 Mac 上运行 ./start.sh status 可查看连接地址。</p>
+            </form>
+            <div class="button-row">
+              <button id="reconnectNowBtn" type="button">立即重连</button>
+              <button id="accessChangeBtn" class="ghost" type="button">更换密钥</button>
+            </div>
           </div>
         </div>
 
@@ -55,11 +67,14 @@
           <button data-view-action="pan" type="button" id="panBtn">平移</button>
           <button id="stageFullscreenBtn" type="button">全屏</button>
           <button id="gestureHelpBtn" type="button">手势</button>
+          <button id="stageKeyboardBtn" type="button">键盘</button>
+          <button id="stageControlBtn" type="button">暂停控制</button>
+          <button id="stageCopyLinkBtn" type="button">分享</button>
           <button id="fullscreenExitBtn" type="button" hidden>退出全屏</button>
         </div>
 
         <!-- 操作反馈 toast（移动端 log 不可见，用 toast 呈现） -->
-        <div id="toast" class="toast" hidden></div>
+        <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
         <!-- 平移模式常驻提示条：可点击退出，避免困在平移模式 -->
         <button id="panExitChip" class="mode-chip" type="button" hidden>平移模式 · 点击退出</button>
@@ -111,6 +126,7 @@
 
       <!-- 桌面端侧栏 -->
       <aside class="sidebar">
+        <p id="controlStateLabel" class="control-state">正在连接…</p>
         <label class="toggle-row">
           <input id="controlEnabled" type="checkbox" checked />
           <span>启用远程控制</span>
@@ -130,10 +146,11 @@
 
         <div class="tool-section">
           <div class="section-title">发送文本</div>
-          <textarea id="bulkTextInput" rows="3" placeholder="输入后点击发送到本机前台应用"></textarea>
+          <textarea id="bulkTextInput" rows="3" aria-label="发送到 Mac 的文本" placeholder="输入后点击发送到本机前台应用"></textarea>
           <div class="button-row">
             <button id="sendBulkText" type="button">发送文本</button>
             <button id="clearBulkText" type="button" class="ghost">清空</button>
+            <button data-restore-text="desktop" type="button" class="ghost" disabled>恢复上次</button>
           </div>
         </div>
 
@@ -160,9 +177,10 @@
         <div class="kbd-head">
           <input
             id="imeInput"
+            aria-label="输入确认后立即发送到 Mac"
             type="text"
             maxlength="2000"
-            placeholder="在此输入，实时发送（支持中文）"
+            placeholder="输入即发送，支持中文"
             autocomplete="off"
             autocapitalize="off"
             autocorrect="off"
@@ -172,10 +190,15 @@
           <button id="kbdMoreBtn" type="button" class="ghost">精简</button>
           <button id="kbdCloseBtn" type="button" class="ghost">关闭</button>
         </div>
-        <!-- 长文本区：移动端发送大段文本的入口（桌面端在侧栏），整段分片发送不截断 -->
+        <div class="ime-hint-row">
+          <p id="imeHint" class="ime-hint">输入确认后立即发送并清空；需要修改的文字请先在「长文」中编辑。</p>
+          <button data-restore-text="drawer" type="button" class="ghost" disabled>恢复上次文本</button>
+        </div>
+        <!-- 长文本区：移动端发送大段文本的入口（桌面端在侧栏），整段提交并等待输入服务确认，过长文本提示分段 -->
         <div class="kbd-bulk" id="kbdBulk" hidden>
           <textarea
             id="kbdBulkInput"
+            aria-label="发送到 Mac 的长文本"
             rows="3"
             placeholder="粘贴或输入长文本，整段发送到 Mac 前台应用"
             autocomplete="off"
@@ -226,6 +249,19 @@
           </div>
         </div>
       </section>
+
+      <div id="shareModal" class="modal-backdrop" hidden>
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="shareModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="shareModalTitle">分享连接地址</h2>
+              <p>长按或全选后复制。持有这个地址的人可控制这台 Mac。</p>
+            </div>
+            <button id="shareModalClose" class="icon-button" type="button" aria-label="关闭">×</button>
+          </header>
+          <input id="shareLinkInput" type="text" readonly aria-label="连接地址" />
+        </section>
+      </div>
 
       <!-- 授权引导弹窗 -->
       <div id="authModal" class="modal-backdrop" hidden>

@@ -83,6 +83,7 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
     private let agentAppPath: String
     private let appDir: String
     private var window: NSWindow?
+    private var refreshTimer: Timer?
     private let statusLabel = NSTextField(labelWithString: "正在检测权限...")
 
     init(agentAppPath: String, appDir: String) {
@@ -104,6 +105,13 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
         refreshStatus()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshStatus()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        refreshTimer?.invalidate()
     }
 
     private func makeContent() -> NSView {
@@ -125,7 +133,7 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
         statusLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 3
+        statusLabel.maximumNumberOfLines = 4
 
         let screenTile = DraggableFileTile(
             title: "拖到“屏幕录制”",
@@ -214,10 +222,20 @@ final class PermissionGuideApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatus() {
-        let status = persistedAgentStatus()
-        let accessibility = status?["accessibilityTrusted"] as? Bool ?? false
-        let screen = status?["screenRecording"] as? Bool ?? false
-        statusLabel.stringValue = "常驻进程状态 — 屏幕录制：\(screen ? "已就绪" : "待授权")    辅助功能：\(accessibility ? "已就绪" : "待授权")\n打开权限后点“重新检测”；若录屏仍未恢复，运行：cd \(appDir) && ./remote.sh restart"
+        guard let status = persistedAgentStatus() else {
+            statusLabel.stringValue = "尚未收到常驻进程的权限记录。请先运行 ./start.sh 启动服务；此窗口会自动更新。"
+            return
+        }
+        let accessibility = status["accessibilityTrusted"] as? Bool ?? false
+        let screen = status["screenRecording"] as? Bool ?? false
+        let timestamp = status["updatedAt"] as? String ?? ""
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let updated = parser.date(from: timestamp)
+        let fresh = updated.map { abs($0.timeIntervalSinceNow) < 15 } ?? false
+        let time = updated.map { DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .medium) } ?? "未知"
+        let freshness = fresh ? "自动更新中" : "记录已过期，请检查服务是否运行"
+        statusLabel.stringValue = "最近记录 — 屏幕录制：\(screen ? "已就绪" : "待授权")    辅助功能：\(accessibility ? "已就绪" : "待授权")\n检测时间：\(time)（\(freshness)）\n授权后如画面仍未恢复，请运行 ./start.sh restart。"
     }
 
     private func persistedAgentStatus() -> [String: Any]? {

@@ -4,13 +4,13 @@
 # 默认行为(start):
 #   1. 生成/更新当前项目的 macOS launchd user service
 #   2. 启用用户登录后自启动
-#   3. npm install 安装依赖,构建 native Swift helper
+#   3. npm ci 安装依赖,构建 native Swift helper
 #   4. 停止已有实例并检查端口占用
 #   5. 通过 service 启动前台进程,并轮询 /health 确认就绪
 #
 # 子命令:
 #   ./start.sh logs              查看实时日志
-#   ./start.sh [启动参数...]      启动/重启 service(默认),额外参数透传,如 -- --fps 10
+#   ./start.sh                   启动 service，健康实例保持运行
 #   ./start.sh stop               停止当前 service 实例(自启配置保留)
 #   ./start.sh status             查看 service 运行状态
 #   ./start.sh restart [参数]     重启 service
@@ -19,7 +19,8 @@
 #   ./start.sh run [启动参数...]  内部前台入口,供 service manager 调用
 
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+umask 077
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$ROOT_DIR"
 
 RUN_DIR=".run"
@@ -60,43 +61,43 @@ kill_existing() {
   if [ -f "$PID_FILE" ]; then
     local oldpid
     oldpid="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+    if [[ "$oldpid" =~ ^[0-9]+$ ]] && [ "$oldpid" -gt 1 ] && kill -0 "$oldpid" 2>/dev/null; then
+      # PID 文件可能跨重启残留。只停止本项目的 Node，绝不杀掉复用 PID 的进程。
+      local process_command process_cwd
+      process_command="$(ps -p "$oldpid" -o command= 2>/dev/null || true)"
+      process_cwd="$(lsof -a -p "$oldpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+      if [[ "$process_command" != *node*server.js* ]] || [ "$process_cwd" != "$ROOT_DIR" ]; then
+        echo "[start] 忽略过期 PID 文件（不属于本项目）"
+        rm -f "$PID_FILE"
+        return
+      fi
       echo "[start] 停止已有进程 PID=$oldpid"
       kill "$oldpid" 2>/dev/null || true
       for _ in $(seq 1 10); do
         kill -0 "$oldpid" 2>/dev/null || break
         sleep 0.5
       done
-      kill -9 "$oldpid" 2>/dev/null || true
+      # 不对可能已被复用的 PID 再次发送 SIGKILL。
+      if kill -0 "$oldpid" 2>/dev/null; then
+        echo "[start] 旧进程尚未退出，请检查 PID=$oldpid" >&2
+        return 1
+      fi
     fi
     rm -f "$PID_FILE"
   fi
 }
 
-# --- 选择可用端口 ---
-# 输出两个以空格分隔的值: PORT CHANGED(1/0)
-select_port() {
-  local target_port="$1"
-  local host="${2:-127.0.0.1}"
-
-  if nc -z "$host" "$target_port" 2>/dev/null; then
-    # 端口被占用,从高位向下扫描
-    local search_start=10000
-    if [ "$target_port" -ge 10000 ]; then
-      search_start=$((target_port + 1))
-    fi
-    for candidate in $(seq "$search_start" 65535); do
-      if ! nc -z "$host" "$candidate" 2>/dev/null; then
-        echo "[start] 端口 $target_port 已被占用,已自动选择 $candidate"
-        echo "$candidate 1"
-        return
-      fi
-    done
-    echo "[start] 错误: 未找到可用端口(已扫描到 65535)" >&2
-    exit 1
-  fi
-
-  echo "$target_port 0"
+# --- 固定端口：冲突时明确失败，已有二维码与收藏地址不会悄悄失效 ---
+check_port_available() {
+  HOST="$HOST" PORT="$PORT" node --input-type=module -e '
+    import net from "node:net";
+    const server = net.createServer();
+    server.on("error", (error) => {
+      console.error(`[start] 无法监听 ${process.env.HOST}:${process.env.PORT} (${error.code})。请关闭占用程序或修改 .env 中的 PORT。`);
+      process.exitCode = 1;
+    });
+    server.listen({ host: process.env.HOST, port: Number(process.env.PORT), exclusive: true }, () => server.close());
+  '
 }
 
 # --- 确保 Node.js 可用 ---
@@ -116,12 +117,14 @@ ensure_node() {
 
 # --- 安装 npm 依赖 ---
 ensure_dependencies() {
-  if [ -d node_modules ] && [ -f node_modules/.package-lock.json ] 2>/dev/null; then
+  if [ -f node_modules/.package-lock.json ] \
+    && [ ! package-lock.json -nt node_modules/.package-lock.json ] \
+    && [ ! package.json -nt node_modules/.package-lock.json ]; then
     return
   fi
 
   echo "[start] 正在安装 npm 依赖 ..."
-  npm install --no-audit --no-fund
+  npm ci --no-audit --no-fund
 }
 
 # --- 构建 native Swift helper ---
@@ -141,33 +144,26 @@ ensure_native_built() {
 # --- 准备运行时环境 ---
 prepare_runtime() {
   mkdir -p "$RUN_DIR"
+  chmod 700 "$RUN_DIR"
+  touch "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
   ensure_node
+  load_env
+  normalize_config
   ensure_dependencies
   ensure_native_built
-  load_env
+}
 
-  # 更新 env 变量(加载 .env 后可能已变化)
+# 启动器与服务端共用数值归一化，探活地址与实际监听保持一致。
+normalize_config() {
+  local normalized
+  normalized="$(HOST="$HOST" PORT="$PORT" FPS="$FPS" QUALITY="$QUALITY" MAX_WIDTH="$MAX_WIDTH" MAX_CLIENTS="$MAX_CLIENTS" node --input-type=module -e '
+    import { loadConfig } from "./lib/config.js";
+    const c = loadConfig();
+    console.log([c.port, c.fps, c.quality, c.maxWidth, c.maxClients].join(" "));
+  ')"
+  read -r PORT FPS QUALITY MAX_WIDTH MAX_CLIENTS <<<"$normalized"
   HOST="${HOST:-0.0.0.0}"
-  PORT="${PORT:-8787}"
-  FPS="${FPS:-15}"
-  QUALITY="${QUALITY:-0.6}"
-  MAX_WIDTH="${MAX_WIDTH:-1920}"
-  MAX_CLIENTS="${MAX_CLIENTS:-4}"
-  REMOTE_TOKEN="${REMOTE_TOKEN:-}"
-
-  # 端口选择
-  local port_selection changed selected_port
-  port_selection="$(select_port "$PORT" "${HOST//0.0.0.0/127.0.0.1}")"
-  read -r selected_port changed <<<"$port_selection"
-  if [ "$changed" = "1" ]; then
-    PORT="$selected_port"
-  fi
-
-  # 0.0.0.0 只用于监听;本机探活固定走 127.0.0.1
-  PROBE_HOST="$HOST"
-  if [ "$PROBE_HOST" = "0.0.0.0" ]; then
-    PROBE_HOST="127.0.0.1"
-  fi
 }
 
 # --- 识别当前系统可用的 service manager ---
@@ -270,6 +266,8 @@ $token_xml
 </dict>
 </plist>
 EOF
+  chmod 600 "$plist"
+  plutil -lint "$plist" >/dev/null
 }
 
 # --- 根据系统类型安装或更新 service 文件 ---
@@ -292,12 +290,14 @@ stop_service_backend() {
     fi
     sleep 0.1
   done
+  echo "[start] service 尚未停止，取消重启以避免重复实例" >&2
+  return 1
 }
 
 # --- 启动并启用 service 自启动 ---
 start_service_backend() {
+  launchctl enable "$(launchd_target)"
   launchctl bootstrap "$(launchd_domain)" "$(launchd_plist_path)"
-  launchctl enable "$(launchd_target)" >/dev/null 2>&1 || true
   launchctl kickstart "$(launchd_target)" >/dev/null 2>&1 || true
 }
 
@@ -310,20 +310,36 @@ effective_token() {
   fi
 }
 
-# --- LAN 地址 ---
-lan_addresses() {
-  local result=()
-  for addr in $(ifconfig | grep 'inet ' | awk '{print $2}' | grep -v '^127\.'); do
-    result+=("$addr")
+# status/start 检查已安装配置，避免 shell 默认值或改动后的 .env 显示错误地址。
+load_installed_environment() {
+  local plist value key
+  plist="$(launchd_plist_path)"
+  [ -f "$plist" ] || return 1
+  for key in HOST PORT FPS QUALITY MAX_WIDTH MAX_CLIENTS REMOTE_TOKEN; do
+    value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || true)"
+    if [ -n "$value" ] || [ "$key" = REMOTE_TOKEN ]; then
+      printf -v "$key" '%s' "$value"
+    fi
   done
-  printf '%s\n' "${result[@]}"
+}
+
+probe_service() {
+  local token
+  token="$(effective_token)"
+  HOST="$HOST" PORT="$PORT" REMOTE_TOKEN="$token" node "$ROOT_DIR/scripts/service-health.mjs" "$@"
+}
+
+print_access_urls() {
+  local token
+  token="$(effective_token)"
+  HOST="$HOST" PORT="$PORT" REMOTE_TOKEN="$token" node "$ROOT_DIR/scripts/access-urls.mjs"
 }
 
 # --- 等待 HTTP 健康检查就绪 ---
 wait_for_health() {
   local ready=0
   for _ in $(seq 1 30); do
-    if curl -s "http://$PROBE_HOST:$PORT/health" >/dev/null 2>&1; then
+    if probe_service; then
       ready=1
       break
     fi
@@ -331,29 +347,31 @@ wait_for_health() {
   done
 
   if [ "$ready" = "1" ]; then
-    local token
-    token="$(effective_token)"
-    echo "[start] 已就绪,监听 http://$PROBE_HOST:$PORT"
-    echo "[start] 控制台: http://$PROBE_HOST:$PORT/?token=$token"
-    echo "[start] LAN 地址:"
-    local addr
-    while IFS= read -r addr; do
-      [ -n "$addr" ] && echo "  http://$addr:$PORT/?token=$token"
-    done < <(lan_addresses)
+    echo "[start] 服务与鉴权检查通过"
+    print_access_urls
+    probe_service --details || true
     echo "[start] 查看日志: tail -f $LOG_FILE   停止当前实例: ./start.sh stop"
     return
   fi
 
-  echo "[start] 启动失败或未就绪,最近日志:" >&2
-  tail -n 30 "$LOG_FILE" >&2 || true
+  echo "[start] 服务未通过健康与鉴权检查。运行 ./start.sh logs 查看原因。" >&2
   exit 1
 }
 
 # --- 兼容旧版 PID 文件状态展示 ---
 legacy_status() {
-  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
-    echo "[start] 旧版后台进程运行中, PID=$(cat "$PID_FILE")"
-    return 0
+  if [ -f "$PID_FILE" ]; then
+    local oldpid
+    oldpid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ "$oldpid" =~ ^[0-9]+$ ]] && [ "$oldpid" -gt 1 ] && kill -0 "$oldpid" 2>/dev/null; then
+      local process_command process_cwd
+      process_command="$(ps -p "$oldpid" -o command= 2>/dev/null || true)"
+      process_cwd="$(lsof -a -p "$oldpid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+      if [[ "$process_command" == *node*server.js* ]] && [ "$process_cwd" = "$ROOT_DIR" ]; then
+        echo "[start] 旧版后台进程运行中, PID=$oldpid"
+        return 0
+      fi
+    fi
   fi
   return 1
 }
@@ -363,10 +381,27 @@ start_managed_service() {
   local backend
   backend="$(detect_service_backend)"
 
+  # 默认启动是幂等操作；应用代码或配置更新时使用 restart。
+  if [ "${RESTART_REQUESTED:-0}" = 0 ] && (
+    load_installed_environment && launchctl print "$(launchd_target)" >/dev/null 2>&1 && probe_service
+  ); then
+    echo "[start] service 已在运行；更新代码或配置请使用 ./start.sh restart"
+    (load_installed_environment && print_access_urls && probe_service --details)
+    return
+  fi
+
   prepare_runtime
-  install_service "$backend" "$@"
+  # 如果用户把 PORT 改成另一个已占用的端口，保留仍在运行的旧服务。
+  # 当前服务自己的端口则必须等 stop 后再检查。
+  local requested_port="$PORT"
+  if ! (load_installed_environment && [ "$PORT" = "$requested_port" ] \
+    && launchctl print "$(launchd_target)" >/dev/null 2>&1) && ! legacy_status >/dev/null; then
+    check_port_available
+  fi
   stop_service_backend "$backend"
   kill_existing
+  check_port_available
+  install_service "$backend" "$@"
 
   echo "[start] 通过 $backend service 启动 local_remote (日志: $LOG_FILE) ..."
   start_service_backend "$backend"
@@ -390,8 +425,14 @@ status_managed_service() {
   if launchctl print "$(launchd_target)" >/dev/null 2>&1; then
     if launchctl print "$(launchd_target)" 2>/dev/null | grep -q "state = running"; then
       echo "[start] service 运行中 ($SERVICE_LABEL)"
-      echo "[start] 控制台: http://127.0.0.1:$PORT/?token=$(effective_token)"
-      return 0
+      load_installed_environment
+      print_access_urls
+      if probe_service --details; then
+        echo "[start] HTTP 与鉴权正常"
+        return 0
+      fi
+      echo "[start] 进程存在，但 HTTP 或鉴权检查未通过" >&2
+      return 1
     fi
     echo "[start] service 已安装但当前未运行 ($SERVICE_LABEL)"
     return 1
@@ -442,10 +483,12 @@ uninstall_service() {
 # --- service manager 调用的前台入口 ---
 run_foreground() {
   prepare_runtime
+  export HOST PORT FPS QUALITY MAX_WIDTH MAX_CLIENTS REMOTE_TOKEN
   echo "[start] 前台运行 local_remote ..."
   exec node server.js "$@"
 }
 
+main() {
 case "${1:-}" in
   stop)
     stop_managed_service
@@ -466,6 +509,7 @@ case "${1:-}" in
     ;;
   restart)
     shift
+    RESTART_REQUESTED=1
     start_managed_service "$@"
     ;;
   run)
@@ -476,7 +520,16 @@ case "${1:-}" in
     shift
     start_managed_service "$@"
     ;;
-  *)
+  '')
     start_managed_service "$@"
     ;;
+  *)
+    echo "Usage: $0 [start|stop|restart|status|logs|doctor|uninstall|run]" >&2
+    return 2
+    ;;
 esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

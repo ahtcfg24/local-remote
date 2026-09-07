@@ -8,8 +8,10 @@ command="${1:-start}"
 case "$command" in
   guide)
     # 打开 macOS 授权拖拽引导弹窗
-    echo "Building native helper..."
-    (cd "$APP_DIR" && npm run build:native)
+    # 未改动时不要重新签名 App，否则打开引导本身可能使 TCC 授权失效。
+    source "$APP_DIR/start.sh"
+    ensure_node
+    ensure_native_built
     echo "Opening permission guide..."
     "$APP_DIR/.build/permission-guide" \
       "$APP_DIR/.build/Local Remote Agent.app" \

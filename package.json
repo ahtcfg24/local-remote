@@ -13,7 +13,8 @@
   "scripts": {
     "build:native": "./scripts/build-native.sh",
     "test": "node --test",
-    "check": "npm test && npm run build:native",
+    "test:native": "\".build/Local Remote Agent.app/Contents/MacOS/local-remote-agent\" --self-test",
+    "check": "npm test && npm run build:native && npm run test:native",
     "bg": "./remote.sh start",
     "guide": "./remote.sh guide",
     "stop": "./remote.sh stop",

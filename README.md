@@ -33,10 +33,12 @@ cd local-remote
 The script installs dependencies, builds the native helpers, starts a launchd user service, and prints access URLs. Scan the QR code shown in the log or open a printed URL such as:
 
 ```text
-http://192.168.1.8:8787/?token=<generated-secret>
+http://192.168.1.8:8787/#token=<generated-secret>
 ```
 
-The random 256-bit token persists in `.run/token` with owner-only permissions. After loading, the browser keeps it in session storage and removes it from the visible address bar. Use **Copy link** when you intentionally need the complete access URL.
+The random 256-bit token persists in `.run/token` with owner-only permissions. New links use a fragment so the credential is not sent in the initial page request; legacy `?token=` links still work. After loading, the browser keeps it in session storage and removes it from the visible address bar. Use **Copy link**, or **Share** in the mobile view tools, to share access. When opened through loopback, the app prefers an available LAN address for sharing.
+
+You can also open the host address and paste a complete access link or key. Invalid keys show a recovery form, and interrupted connections retry automatically. Permission, capture, and control states are visible; input is blocked until a current frame is available. **Pause control** temporarily switches to viewing.
 
 ### macOS permissions
 
@@ -59,12 +61,23 @@ Local source builds use ad-hoc signing by default, so macOS may ask again after 
 LOCAL_REMOTE_CODESIGN_IDENTITY="Apple Development: ..." npm run build:native
 ```
 
+If both switches are enabled but the restarted service still reports no permission, macOS may retain a requirement for the previous signature. Toggling the switches did not replace that stale record in our live test. After completing the build, reset only this app's two decisions, then authorize the current app again:
+
+```bash
+./start.sh stop
+tccutil reset Accessibility com.local-remote.agent
+tccutil reset ScreenCapture com.local-remote.agent
+./start.sh
+```
+
+This removes only this app's two permission decisions. Enable **Local Remote Agent** in Accessibility and Screen & System Audio Recording afterward; do not rebuild again after granting access. See [Apple's permission-reset documentation](https://developer.apple.com/documentation/xcode/resetting-access-to-protected-resources-in-macos).
+
 ## Service commands
 
 ```bash
-./start.sh             # install or update, then start
-./start.sh status      # show service state and local access URL
-./start.sh restart     # rebuild configuration and restart
+./start.sh             # install/start; leave a healthy instance running
+./start.sh status      # check HTTP, authentication and worker; show current URLs
+./start.sh restart     # apply code/config updates, rebuild if needed, and restart
 ./start.sh stop        # stop while keeping login startup configuration
 ./start.sh logs        # follow the service log
 ./start.sh doctor      # check macOS, tools, build, and token state
@@ -72,6 +85,8 @@ LOCAL_REMOTE_CODESIGN_IDENTITY="Apple Development: ..." npm run build:native
 ```
 
 `./remote.sh` remains a compatibility entry point for these commands. For foreground development, use `npm start`.
+
+The configured port stays fixed: conflicts fail with an actionable error instead of silently changing the URL. DHCP can still change the Mac's address; run `./start.sh status` to retrieve current links. Logs and launchd configuration may contain access credentials, so the launcher restricts them to the current user. Opening the permission guide does not rebuild or re-sign unchanged helpers.
 
 ## Mobile controls
 
@@ -87,6 +102,14 @@ LOCAL_REMOTE_CODESIGN_IDENTITY="Apple Development: ..." npm run build:native
 | Pinch | Zoom remote view | Zoom remote view |
 
 The first mobile visit displays an in-app gesture guide. The bottom dock exposes mode switching, keyboard, right-click, drag lock, and view tools.
+
+### Text and multiple viewers
+
+- The keyboard field sends text after input-method commitment. Use the long-text editor to revise drafts before sending. Local draft edits never backspace through the remote application; use the remote Backspace button for deletion.
+- Each send is limited to 4,000 UTF-16 code units. Oversized messages are rejected in full; split them manually. Failed sends preserve the text, and reconnection never automatically replays it.
+- A text acknowledgement means the complete command was handed to the native input process, not that the target application saved or finished applying it. Check the Mac before retrying an uncertain send after a disconnect or permission change.
+- **Restore last text** places the most recently submitted text back into the draft without resending it. This recovery copy is kept only in page memory and disappears on reload.
+- Multiple devices may view simultaneously. While one device holds a mouse button or drags, other devices cannot control the host. Blur, pause, disconnect, and stale-connection cleanup release held input.
 
 ## Configuration
 
@@ -126,10 +149,11 @@ The server discards frames for slow clients instead of building latency. It also
 npm ci
 npm test
 npm run build:native
+npm run test:native
 npm start
 ```
 
-CI runs the JavaScript tests and native Swift build on macOS. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before a substantial change.
+`npm run check` runs JavaScript regressions, the Swift build, and native self-tests. HTTP/WebSocket tests use an isolated worker substitute; native self-tests do not prompt for permissions, capture the screen, or inject input. CI runs these checks on macOS. Physical phones, sleep/wake, and display hot-plug still require device testing. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before a substantial change.
 
 ## Security and limitations
 

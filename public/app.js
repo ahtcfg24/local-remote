@@ -4,9 +4,12 @@
 // 移动端要点：轻点零延迟（clickState 计数）、惯性滚动、拖拽/长按可视反馈、
 //   visualViewport 键盘抬升、屏幕保活、后台恢复秒重连、toast 操作反馈。
 
+import { RemoteConnection, accessTokenFrom } from './connection.js';
+import { TextSender } from './text-sender.js';
+
 // ---------- DOM 引用 ----------
 
-const tokenFromUrl = new URLSearchParams(window.location.search).get('token') || '';
+const tokenFromUrl = accessTokenFrom(window.location.href, { allowBare: false });
 let storedToken = '';
 try {
   storedToken = sessionStorage.getItem('localRemoteToken') || '';
@@ -14,10 +17,15 @@ try {
 } catch {
   // 某些隐私模式禁用 sessionStorage，当前页面仍可正常使用 URL 中的 token。
 }
-const token = tokenFromUrl || storedToken;
+let token = tokenFromUrl || storedToken;
 if (tokenFromUrl && window.history?.replaceState) {
   // 避免访问密钥长期停留在浏览器历史、截图和地址栏中。
-  window.history.replaceState(null, '', `${window.location.pathname}${window.location.hash}`);
+  const cleanUrl = new URL(window.location.href);
+  cleanUrl.searchParams.delete('token');
+  const fragment = new URLSearchParams(cleanUrl.hash.slice(1));
+  fragment.delete('token');
+  cleanUrl.hash = fragment.toString();
+  window.history.replaceState(null, '', `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`);
 }
 const $ = (id) => document.getElementById(id);
 
@@ -73,6 +81,13 @@ const touchFeedback = $('touchFeedback');
 const gestureGuide = $('gestureGuide');
 const gestureGuideClose = $('gestureGuideClose');
 const gestureHelpBtn = $('gestureHelpBtn');
+const accessForm = $('accessForm');
+const accessInput = $('accessInput');
+const accessChangeBtn = $('accessChangeBtn');
+const streamHelpBtn = $('streamHelpBtn');
+const controlToggleBtn = $('controlToggleBtn');
+const controlStateLabel = $('controlStateLabel');
+const imeHint = $('imeHint');
 
 // ---------- 全局状态 ----------
 
@@ -80,11 +95,16 @@ const gestureHelpBtn = $('gestureHelpBtn');
 // 部分浏览器（桌面视口模式/魔改内核）不上报 coarse，但触控交互仍应按移动端处理
 const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
 
-let ws = null;
-let reconnectTimer = null;
-let reconnectDelay = 1000;
-let hasEverConnected = false;
-let lastWsMessageAt = 0;
+let connection;
+let latestStatus = null;
+let connectionState = 'connecting';
+let hasFrame = false;
+let frameGeneration = 0;
+let latestStatusError = '';
+let lastInputError = '';
+let accessUrls = [];
+let textSender;
+let lastSubmittedText = '';
 let screenSize = { width: canvas.width, height: canvas.height };
 let cursor = { x: 640, y: 360 };
 let cursorInitialized = false;
@@ -127,19 +147,60 @@ function showToast(message, duration = 1400) {
 // 统一反馈入口：写日志，移动端同时弹 toast
 function notify(message) {
   log(message);
-  if (isCoarsePointer) showToast(message);
+  showToast(message);
 }
 
-function setConnection(state, label) {
+function setConnection(state, label, detail = '') {
+  connectionState = state;
   connectionDot.dataset.state = state;
   connectionLabel.textContent = label;
-  // 断线遮罩：连过一次之后的断开/重连才显示，首次加载走 emptyState
+  connOverlay.hidden = state === 'open';
+  connOverlayText.textContent = detail || label;
+  accessForm.hidden = state !== 'auth';
+  reconnectNowBtn.hidden = state === 'auth';
+  accessChangeBtn.hidden = state === 'auth';
   if (state === 'open') {
-    connOverlay.hidden = true;
-  } else if (hasEverConnected) {
-    connOverlayText.textContent = state === 'connecting' ? '连接已断开，正在重连…' : '连接已断开';
-    connOverlay.hidden = false;
+    log('已连接');
+    if (!isCoarsePointer && authModal.hidden && gestureGuide.hidden) canvas.focus();
   }
+  refreshControlState();
+}
+
+function inputBlockReason() {
+  if (!connection?.isOpen) return '尚未连接，操作未发送';
+  if (!controlEnabled.checked) return '当前仅查看，点击「恢复控制」后操作';
+  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') return 'Mac 控制服务正在恢复，请稍后操作';
+  if (latestStatus?.permissions?.accessibility !== 'ok') return 'Mac 尚未授予辅助功能权限';
+  if (latestStatus?.capturing === false || !hasFrame) return '等待当前屏幕画面后再操作';
+  return '';
+}
+
+function refreshControlState() {
+  const reason = inputBlockReason();
+  controlToggleBtn.textContent = controlEnabled.checked ? '暂停控制' : '恢复控制';
+  $('stageControlBtn').textContent = controlToggleBtn.textContent;
+  controlToggleBtn.classList.toggle('active', !controlEnabled.checked);
+  controlToggleBtn.setAttribute('aria-pressed', String(!controlEnabled.checked));
+  controlStateLabel.textContent = reason || (latestStatus?.control?.busy ? '其他设备可能正在拖拽，结束后即可操作' : '可控制 · 点击画面后使用实体键盘');
+  canvas.setAttribute('aria-label', reason ? `远程屏幕：${reason}` : '远程屏幕，可控制');
+  dockRightClickBtn.disabled = Boolean(reason);
+  dockDragBtn.disabled = Boolean(reason) && !dragLocked;
+  sendBulkText.disabled = Boolean(reason) || bulkTextInput.dataset.sending === 'true';
+  kbdBulkSend.disabled = Boolean(reason) || kbdBulkInput.dataset.sending === 'true';
+}
+
+function updateStreamState() {
+  if (connectionState !== 'open') return;
+  let message = '';
+  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') message = 'Mac 控制服务正在恢复…';
+  else if (latestStatus?.permissions?.screenRecording !== 'ok') message = '请在 Mac 上允许 Local Remote Agent 录制屏幕';
+  else if (latestStatus?.capturing === false) message = '屏幕采集暂不可用，正在恢复…';
+  else if (!hasFrame) message = '已连接，等待第一帧屏幕画面…';
+  emptyState.textContent = message;
+  emptyState.hidden = !message;
+  screenWrap.classList.toggle('stream-unavailable', Boolean(message));
+  streamHelpBtn.hidden = !message || latestStatus?.permissions?.screenRecording === 'ok';
+  refreshControlState();
 }
 
 // ---------- 网络层 ----------
@@ -149,21 +210,26 @@ let byteCount = 0;
 let decoding = false;
 let pendingFrame = null;
 
-async function drawFrame(buffer) {
+async function drawFrame(buffer, generation = frameGeneration) {
   // 解码期间只保留最新一帧，防止慢设备上积压导致延迟
   if (decoding) {
-    pendingFrame = buffer;
+    pendingFrame = { buffer, generation };
     return;
   }
   decoding = true;
   try {
     const bitmap = await createImageBitmap(new Blob([buffer], { type: 'image/jpeg' }));
+    if (generation !== frameGeneration || !connection?.isOpen) {
+      bitmap.close?.();
+      return;
+    }
     if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
       canvas.width = bitmap.width;
       canvas.height = bitmap.height;
     }
-    emptyState.hidden = true;
+    hasFrame = true;
     ctx.drawImage(bitmap, 0, 0);
+    updateStreamState();
     bitmap.close?.();
   } catch (error) {
     log(`绘制屏幕帧失败：${error.message}`);
@@ -172,15 +238,24 @@ async function drawFrame(buffer) {
     if (pendingFrame) {
       const next = pendingFrame;
       pendingFrame = null;
-      drawFrame(next);
+      drawFrame(next.buffer, next.generation);
     }
   }
 }
 
 function updateStatus(payload) {
+  const geometryChanged = payload.screen?.width && payload.screen?.height
+    && (payload.screen.width !== screenSize.width || payload.screen.height !== screenSize.height);
+  if (geometryChanged || payload.capturing === false || (payload.agent && payload.agent.state !== 'ready')) {
+    hasFrame = false;
+    pendingFrame = null;
+    frameGeneration += 1;
+  }
+  latestStatus = payload;
+  if (Array.isArray(payload.accessUrls)) accessUrls = payload.accessUrls;
   if (payload.screen?.width && payload.screen?.height) {
     screenSize = payload.screen;
-    if (!cursorInitialized) {
+    if (!cursorInitialized || cursor.x >= screenSize.width || cursor.y >= screenSize.height) {
       cursor = { x: screenSize.width / 2, y: screenSize.height / 2 };
       cursorInitialized = true;
     }
@@ -200,107 +275,22 @@ function updateStatus(payload) {
   permissionLabel.classList.toggle('perm-warn', !(screenOk && accessOk));
 
   const errors = [payload.errors?.capture, payload.errors?.agent].filter(Boolean);
-  if (errors.length) log(errors.join('\n'));
+  const errorText = errors.join('\n');
+  if (errorText && errorText !== latestStatusError) log(errorText);
+  latestStatusError = errorText;
+  if (inputBlockReason()) resetInteractions();
+  updateStreamState();
 }
 
-function connect() {
-  clearTimeout(reconnectTimer);
-  if (!token) {
-    setConnection('closed', '缺少访问令牌');
-    emptyState.textContent = '访问地址无效，请重新扫描服务端二维码。';
-    return;
-  }
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 用局部变量捕获本次连接：旧连接晚到的事件（socket !== ws）一律忽略，
-  // 防止 reconnectNow 后旧 close 事件再排定重连、孤儿化新连接
-  const socket = new WebSocket(`${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`);
-  socket.binaryType = 'arraybuffer';
-  ws = socket;
-  setConnection('connecting', '连接中');
+function connect() { return connection.connect(); }
+function reconnectNow() { return connection.reconnect(token); }
+function probeConnection() { connection.probe(); }
 
-  socket.addEventListener('open', () => {
-    if (socket !== ws) return;
-    clearTimeout(reconnectTimer);
-    hasEverConnected = true;
-    setConnection('open', '已连接');
-    reconnectDelay = 1000;
-    log('已连接');
-    if (!isCoarsePointer) canvas.focus();
-  });
-
-  socket.addEventListener('message', (event) => {
-    if (socket !== ws) return;
-    lastWsMessageAt = performance.now();
-    if (typeof event.data === 'string') {
-      try {
-        const payload = JSON.parse(event.data);
-        if (payload.type === 'status') updateStatus(payload);
-        // pong 仅用于连接探活，收到即代表链路存活，无需处理内容
-      } catch {
-        log(event.data);
-      }
-      return;
-    }
-    frameCount += 1;
-    byteCount += event.data.byteLength;
-    drawFrame(event.data);
-  });
-
-  socket.addEventListener('close', () => {
-    if (socket !== ws) return;
-    setConnection('closed', '已断开');
-    reconnectTimer = setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(5000, reconnectDelay + 1000);
-  });
-
-  socket.addEventListener('error', () => {
-    if (socket !== ws) return;
-    setConnection('closed', '连接错误');
-  });
-}
-
-// 立即重连：清空退避计时，关闭旧连接后重建
-function reconnectNow() {
-  clearTimeout(reconnectTimer);
-  reconnectDelay = 1000;
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-    try {
-      ws.close();
-    } catch {
-      // 关闭失败不影响重建
-    }
-  }
-  connect();
-}
-
-// 探测僵尸连接：iOS 回前台后 readyState 可能仍是 OPEN 但底层 TCP 已死。
-// 发一个 ping（服务端回 pong），2 秒内没有任何消息则强制重连。
-function probeConnection() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const probeStart = performance.now();
-  try {
-    ws.send(JSON.stringify({ type: 'ping' }));
-  } catch {
-    reconnectNow();
-    return;
-  }
-  setTimeout(() => {
-    if (ws && ws.readyState === WebSocket.OPEN && lastWsMessageAt < probeStart) {
-      log('连接无响应，重新连接');
-      reconnectNow();
-    }
-  }, 2000);
-}
-
-// 绕过 controlEnabled 开关的发送通道：按下状态释放等安全消息专用
-function sendRaw(payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(payload));
-}
-
+// Releases bypass the viewing switch; all other input requires a usable frame.
+function sendRaw(payload) { return connection?.send(payload) || false; }
 function send(payload) {
-  if (!controlEnabled.checked) return;
-  sendRaw(payload);
+  if (inputBlockReason()) return false;
+  return sendRaw(payload);
 }
 
 // 指针移动/拖拽节流：16ms 内只发最新位置
@@ -332,7 +322,7 @@ function flushMove() {
 // 每秒刷新帧率/带宽统计（移动端只显示帧率，节省顶栏空间）
 setInterval(() => {
   const mb = byteCount / (1024 * 1024);
-  statsLabel.textContent = isCoarsePointer
+  statsLabel.textContent = connectionState !== 'open' ? '—' : isCoarsePointer
     ? `${frameCount}fps`
     : `${screenSize.width}×${screenSize.height} · ${frameCount}fps · ${mb.toFixed(1)}MB/s`;
   frameCount = 0;
@@ -341,52 +331,33 @@ setInterval(() => {
 
 // ---------- 屏幕保活 ----------
 
-// 远程操控中手机自动锁屏会断开会话。优先用标准 Wake Lock API；
-// 本项目常以 http://192.168.x.x 访问（非安全上下文），wakeLock 不存在时
-// 回退为播放内联的 2x2 静音循环视频阻止锁屏（NoSleep 方案，纯本地资源）。
-const WAKE_VIDEO_SRC =
-  'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAANNbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAJxAAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAnd0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAJxAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAIAAAACAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAACcQAAAAAAABAAAAAAHvbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAACgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABmm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAVpzdGJsAAAAunN0c2QAAAAAAAAAAQAAAKphdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAIAAgBIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAAMGF2Y0MBQsAK/+EAGGdCwArZH4iIwEQAAAMABAAAAwAIPEiZIAEABWjLg8sgAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAAAkcAAAAAAAAAGHN0dHMAAAAAAAAAAQAAAAoAAEAAAAAAFHN0c3MAAAAAAAAAAQAAAAEAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAoAAAABAAAAPHN0c3oAAAAAAAAAAAAAAAoAAAKGAAAACgAAAAoAAAAJAAAACQAAAAkAAAAJAAAACQAAAAkAAAAJAAAAFHN0Y28AAAAAAAAAAQAAA30AAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYyLjEyLjEwMAAAAAhmcmVlAAAC4W1kYXQAAAJwBgX//2zcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgxOjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAADmWIhAX///8PRQABV5+AAAAABkGaOAv6gAAAAAZBmlQC/qAAAAAFQZpgF/UAAAAFQZqAF/UAAAAFQZqgF/UAAAAFQZrAF/UAAAAFQZrgF/UAAAAFQZsAFvUAAAAFQZsgFfU=';
-
+// Screen Wake Lock is best effort. Insecure LAN origins often lack this API;
+// avoid hidden media fallbacks and retry only after returning to the foreground.
 let wakeLockSentinel = null;
-let keepAwakeVideo = null;
-
-async function acquireWakeLock() {
-  if (!('wakeLock' in navigator)) return false;
-  try {
-    wakeLockSentinel = await navigator.wakeLock.request('screen');
-    wakeLockSentinel.addEventListener('release', () => {
-      wakeLockSentinel = null;
-    });
-    return true;
-  } catch (error) {
-    log(`屏幕常亮申请失败：${error.message}`);
-    return false;
-  }
-}
-
-function ensureKeepAwakeVideo() {
-  if (keepAwakeVideo) return keepAwakeVideo;
-  const video = document.createElement('video');
-  video.setAttribute('playsinline', '');
-  video.muted = true;
-  video.loop = true;
-  video.src = WAKE_VIDEO_SRC;
-  video.style.cssText = 'position:fixed;left:-4px;top:-4px;width:2px;height:2px;opacity:0.01;pointer-events:none;';
-  document.body.appendChild(video);
-  keepAwakeVideo = video;
-  return video;
-}
+let wakeLockPending = null;
+let wakeLockFailureLogged = false;
 
 async function keepAwake() {
-  if (wakeLockSentinel) return;
-  if (await acquireWakeLock()) return;
-  if (!isCoarsePointer) return;
-  // 视频保活必须由用户手势触发 play，失败则等下一次手势再试
-  try {
-    await ensureKeepAwakeVideo().play();
-  } catch {
-    // 尚无用户手势，静默等待
+  if (document.visibilityState === 'hidden' || wakeLockSentinel) return;
+  if (wakeLockPending) return wakeLockPending;
+  if (!navigator.wakeLock?.request) {
+    if (!wakeLockFailureLogged) log('当前浏览器不支持屏幕常亮');
+    wakeLockFailureLogged = true;
+    return;
   }
+  wakeLockPending = (async () => {
+    try {
+      const sentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel = sentinel;
+      sentinel.addEventListener('release', () => {
+        if (wakeLockSentinel === sentinel) wakeLockSentinel = null;
+      });
+    } catch (error) {
+      if (!wakeLockFailureLogged) log(`屏幕常亮申请未获允许：${error.message}`);
+      wakeLockFailureLogged = true;
+    }
+  })();
+  try { await wakeLockPending; } finally { wakeLockPending = null; }
 }
 
 // ---------- 视图变换与坐标映射 ----------
@@ -603,6 +574,7 @@ function touchClickRadius() {
 
 const mouseButtonNames = ['left', 'middle', 'right'];
 let desktopButtonDown = null;
+let desktopPan = null;
 
 // 指针事件挂在 screenWrap 上：触控板/平移模式下画布外的黑边也是有效操作面
 // （画面顶部对齐后，下方黑边正是拇指最顺手的触控板区域）。
@@ -615,11 +587,21 @@ function acceptsPointerDown(event) {
 
 screenWrap.addEventListener('pointerdown', (event) => {
   if (!acceptsPointerDown(event)) return;
+  if (inputBlockReason() && !panMode) {
+    notify(inputBlockReason());
+    return;
+  }
   if (event.pointerType === 'touch') {
     handleTouchDown(event);
     return;
   }
+  if (event.button > 2 || desktopButtonDown) return;
   screenWrap.setPointerCapture?.(event.pointerId);
+  if (panMode && event.button === 0) {
+    desktopPan = { x: event.clientX, y: event.clientY };
+    event.preventDefault();
+    return;
+  }
   canvas.focus();
   const point = eventToScreenPoint(event);
   setCursor(point);
@@ -632,6 +614,13 @@ screenWrap.addEventListener('pointerdown', (event) => {
 screenWrap.addEventListener('pointermove', (event) => {
   if (event.pointerType === 'touch') {
     handleTouchMove(event);
+    return;
+  }
+  if (desktopPan) {
+    view.panX += event.clientX - desktopPan.x;
+    view.panY += event.clientY - desktopPan.y;
+    desktopPan = { x: event.clientX, y: event.clientY };
+    applyViewTransform();
     return;
   }
   // 黑边上的悬停不产生远程事件；按下拖拽因指针捕获照常跟随
@@ -650,6 +639,8 @@ screenWrap.addEventListener('pointerup', (event) => {
     handleTouchUp(event);
     return;
   }
+  if (desktopPan) { desktopPan = null; event.preventDefault(); return; }
+  if (desktopButtonDown && mouseButtonNames[event.button] !== desktopButtonDown) return;
   if (!desktopButtonDown && event.target !== canvas) return;
   const point = eventToScreenPoint(event);
   setCursor(point);
@@ -666,10 +657,11 @@ screenWrap.addEventListener('pointercancel', (event) => {
     handleTouchCancel(event);
     return;
   }
-  if (desktopButtonDown) {
-    send({ type: 'pointer_up', ...cursor, button: desktopButtonDown });
-    desktopButtonDown = null;
-  }
+  resetInteractions();
+});
+
+screenWrap.addEventListener('lostpointercapture', (event) => {
+  if (touches.has(event.pointerId) || desktopButtonDown || desktopPan) resetInteractions();
 });
 
 screenWrap.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -683,7 +675,12 @@ screenWrap.addEventListener(
       const origin = { x: event.clientX - center.x, y: event.clientY - center.y };
       setZoom(view.zoom * (event.deltaY < 0 ? 1.12 : 0.88), origin);
     } else {
-      const scale = event.deltaMode === 1 ? 16 : 1;
+      if (event.target !== canvas || inputBlockReason()) return;
+      const point = eventToScreenPoint(event);
+      setCursor(point);
+      flushMove();
+      send({ type: 'pointer_move', ...point });
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? screenSize.height : 1;
       send({ type: 'wheel', dx: event.deltaX * scale, dy: event.deltaY * scale });
     }
     event.preventDefault();
@@ -701,6 +698,7 @@ const namedKeyMap = {
 };
 
 canvas.addEventListener('keydown', (event) => {
+  if (event.isComposing || event.keyCode === 229 || inputBlockReason()) return;
   const modifiers = [];
   if (event.shiftKey) modifiers.push('shift');
   if (event.ctrlKey) modifiers.push('control');
@@ -864,10 +862,10 @@ function trackpadAcceleration(dx, dy, dtMs) {
 }
 
 function beginRemoteDrag(point) {
+  if (!send({ type: 'pointer_down', ...point, button: 'left', modifiers: takeModifiers() })) return;
   touchDragging = true;
   remoteCursor.classList.add('dragging');
   navigator.vibrate?.(10);
-  send({ type: 'pointer_down', ...point, button: 'left', modifiers: takeModifiers() });
   positionRemoteCursor();
 }
 
@@ -905,6 +903,9 @@ function handleTouchDown(event) {
   }
 
   if (touches.size === 2) {
+    // A second finger ends a held mouse button before scrolling or pinching.
+    if (touchDragging) endRemoteDrag(cursor);
+    if (dragLocked) setDragLock(false, false);
     // 进入双指手势：取消单指的一切待定行为
     cancelLongPress();
     clearDirectHold();
@@ -933,6 +934,11 @@ function handleTouchDown(event) {
   if (touches.size > 2) {
     twoFinger = null;
     // 参与过三指以上手势的触点抬起时不得产生轻点
+    suppressTap = true;
+    return;
+  }
+
+  if (dragLocked) {
     suppressTap = true;
     return;
   }
@@ -1142,7 +1148,7 @@ function handleTouchUp(event) {
     return;
   }
 
-  if (!info) return;
+  if (!info || dragLocked) return;
   const now = performance.now();
   const duration = now - info.startTime;
 
@@ -1188,6 +1194,7 @@ function handleTouchCancel(event) {
 // ---------- 触控模式与拖拽锁定 ----------
 
 function setTouchMode(mode, announce = true) {
+  if (announce) resetInteractions();
   touchMode = mode;
   document.querySelectorAll('[data-touch-mode]').forEach((button) => {
     button.classList.toggle('active', button.dataset.touchMode === mode);
@@ -1199,6 +1206,7 @@ function setTouchMode(mode, announce = true) {
 
 function setDragLock(locked, announce = true) {
   if (locked === dragLocked) return;
+  if (locked && inputBlockReason()) { notify(inputBlockReason()); return; }
   dragLocked = locked;
   dockDragBtn.classList.toggle('active', locked);
   remoteCursor.classList.toggle('dragging', locked);
@@ -1206,7 +1214,8 @@ function setDragLock(locked, announce = true) {
     send({ type: 'pointer_down', ...cursor, button: 'left', modifiers: takeModifiers() });
     if (announce) notify('拖拽锁定开启');
   } else {
-    send({ type: 'pointer_up', ...cursor, button: 'left' });
+    flushMove();
+    sendRaw({ type: 'pointer_up', ...cursor, button: 'left' });
     if (announce) notify('拖拽锁定关闭');
   }
   positionRemoteCursor();
@@ -1216,6 +1225,7 @@ function setDragLock(locked, announce = true) {
 
 // 平移状态用显式变量与常驻提示条表达，避免用户困在“触摸全被平移吃掉”的状态里
 function setPanMode(active, announce = true) {
+  resetInteractions();
   panMode = active;
   panBtn.classList.toggle('active', active);
   panExitChip.hidden = !active;
@@ -1228,8 +1238,9 @@ panExitChip.addEventListener('click', () => setPanMode(false));
 
 // ---------- 键盘抽屉与 IME ----------
 
-let imePrev = '';
 let composing = false;
+let imePending = null;
+let imeNeedsExplicitSend = false;
 
 // visualViewport：iOS/Android 弹出系统键盘时只收缩可视视口，
 // fixed 定位的抽屉会被键盘遮住——按遮挡高度把抽屉平移到键盘上方
@@ -1253,6 +1264,7 @@ function openKeyboard() {
 }
 
 function closeKeyboard() {
+  keyRepeatStops.forEach((stop) => stop());
   kbdPanel.hidden = true;
   kbdPanel.style.transform = '';
   dockKeyboardBtn.classList.remove('active');
@@ -1275,29 +1287,45 @@ function setKbdCompact(compact, persist = true) {
 
 kbdMoreBtn.addEventListener('click', () => setKbdCompact(!kbdPanel.classList.contains('compact')));
 
-// 输入框内容差分同步：比较公共前缀+公共后缀，只发送中间差异。
-// 中间编辑时先 ←/退格 定位删除，再补文本，最后 → 归位，远端不再整段闪烁重打。
-function syncImeInput() {
-  const current = imeInput.value;
-  if (current === imePrev) return;
-  let prefix = 0;
-  const max = Math.min(current.length, imePrev.length);
-  while (prefix < max && current[prefix] === imePrev[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < max - prefix &&
-    current[current.length - 1 - suffix] === imePrev[imePrev.length - 1 - suffix]
-  ) {
-    suffix += 1;
+// A committed composition is appended once, then the local field is cleared.
+// Keeping a mirror of a remote editor is unsafe: the Mac caret can move without
+// our knowledge, so local edits must never generate inferred remote deletions.
+async function syncImeInput(force = false) {
+  if (composing) return;
+  if (imePending) {
+    if (!imePending.accepted) return;
+    const submitted = imePending.text;
+    imePending = null;
+    if (imeInput.value.startsWith(submitted)) imeInput.value = imeInput.value.slice(submitted.length);
+    else {
+      imeNeedsExplicitSend = true;
+      imeHint.textContent = '已发送的文字随后被本地编辑。请检查 Mac；输入框内容保留，按回车可另行发送。';
+      return;
+    }
   }
-  const removed = imePrev.length - prefix - suffix;
-  const added = current.slice(prefix, current.length - suffix);
-  // 连发键用 repeat 字段合并为单条消息（agent 端循环注入），删除/移位大段文本不再刷屏
-  if (suffix) send({ type: 'key_press', key: 'arrowleft', modifiers: [], repeat: suffix });
-  if (removed) send({ type: 'key_press', key: 'backspace', modifiers: [], repeat: removed });
-  if (added) send({ type: 'type_text', text: added });
-  if (suffix) send({ type: 'key_press', key: 'arrowright', modifiers: [], repeat: suffix });
-  imePrev = current;
+  if (imeNeedsExplicitSend && !force) return;
+  const current = imeInput.value;
+  if (!current) return;
+  const reason = inputBlockReason();
+  if (reason) {
+    imeNeedsExplicitSend = true;
+    imeHint.textContent = `${reason}。文字保留在输入框，恢复后可按回车发送。`;
+    return;
+  }
+  imeNeedsExplicitSend = false;
+  const pending = { text: current, accepted: false };
+  imePending = pending;
+  try {
+    await sendText(current);
+    if (imePending !== pending) return;
+    pending.accepted = true;
+    imeHint.textContent = '已提交到 Mac 输入服务；可恢复上次文本。需要修改的文字请先在「长文」中编辑。';
+    if (!composing) syncImeInput();
+  } catch (error) {
+    if (imePending === pending) imePending = null;
+    imeNeedsExplicitSend = true;
+    imeHint.textContent = `${error.message}。文字已保留，请检查 Mac 后再按回车重试。`;
+  }
 }
 
 imeInput.addEventListener('compositionstart', () => {
@@ -1311,11 +1339,10 @@ imeInput.addEventListener('input', () => {
   if (!composing) syncImeInput();
 });
 imeInput.addEventListener('keydown', (event) => {
-  if (composing) return;
+  if (composing || event.isComposing || event.keyCode === 229) return;
   if (event.key === 'Enter') {
-    sendKey('enter', []);
-    imeInput.value = '';
-    imePrev = '';
+    if (imeInput.value) syncImeInput(true);
+    else sendKey('enter', []);
     event.preventDefault();
     return;
   }
@@ -1328,6 +1355,13 @@ imeInput.addEventListener('keydown', (event) => {
   if (stickyModifiers.size && event.key.length === 1) {
     sendKey(event.key.toLowerCase());
     event.preventDefault();
+  }
+});
+
+imeInput.addEventListener('beforeinput', (event) => {
+  if (!composing && event.inputType === 'deleteContentBackward' && !imeInput.value) {
+    event.preventDefault();
+    sendKey('backspace', []);
   }
 });
 
@@ -1362,12 +1396,14 @@ document.querySelectorAll('[data-modifier]').forEach((button) => {
 // 常用键：pointerdown 立即发送；白名单键按住 400ms 后以 60ms/次连发（key repeat）
 const REPEATABLE_KEYS = new Set(['Backspace', 'ForwardDelete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space']);
 
-// 抽屉按键发送：⌫ 在 IME 输入框有内容时删本地暂存并走差分同步，
-// 保持“远端内容 === imePrev”的基线不变量；其余情况直发远端
+// Local unsent text remains local; drawer navigation never derives edits in
+// a remote application from an old input-buffer baseline.
+const keyRepeatStops = new Set();
 function pressDrawerKey(rawKeyName, key, mods) {
-  if (rawKeyName === 'Backspace' && !mods.length && !kbdPanel.hidden && imeInput.value) {
-    imeInput.value = imeInput.value.slice(0, -1);
-    syncImeInput();
+  if (rawKeyName === 'Backspace' && !mods.length && imeInput.value) {
+    const chars = Array.from(imeInput.value);
+    chars.pop();
+    imeInput.value = chars.join('');
     return;
   }
   send({ type: 'key_press', key, modifiers: mods });
@@ -1382,6 +1418,7 @@ document.querySelectorAll('[data-key]').forEach((button) => {
     holdTimer = null;
     repeatTimer = null;
   };
+  keyRepeatStops.add(stopRepeat);
   button.addEventListener('pointerdown', (event) => {
     // 阻止默认避免抢走 imeInput 焦点/触发长按选择
     event.preventDefault();
@@ -1396,7 +1433,11 @@ document.querySelectorAll('[data-key]').forEach((button) => {
       repeatTimer = setInterval(() => pressDrawerKey(rawKeyName, key, mods), 60);
     }, 400);
   });
-  ['pointerup', 'pointercancel', 'pointerleave'].forEach((name) => button.addEventListener(name, stopRepeat));
+  ['pointerup', 'pointercancel', 'pointerleave', 'lostpointercapture'].forEach((name) => button.addEventListener(name, stopRepeat));
+  button.addEventListener('click', (event) => {
+    // Keyboard and assistive-technology activation has no pointerdown.
+    if (event.detail === 0) pressDrawerKey(button.dataset.key, button.dataset.key.toLowerCase(), takeModifiers());
+  });
 });
 
 document.querySelectorAll('[data-shortcut]').forEach((button) => {
@@ -1407,36 +1448,37 @@ document.querySelectorAll('[data-shortcut]').forEach((button) => {
   });
 });
 
-// ---------- 长文本发送（分片） ----------
+// ---------- 文本发送：服务端逐条确认，不自动重放 ----------
 
-// 服务端对单条 type_text 限长 2000（UTF-16 单元）。按码点分片逐条发送：
-// 长文本不再截断丢失，也不会把 emoji 等代理对拆到两条消息里
-const TEXT_CHUNK_CODEPOINTS = 1000;
-
-// 返回实际发送的字符数（码点计）；无内容/未连接/控制停用时提示并返回 0
-function sendTextInChunks(text) {
-  if (!text) {
-    notify('没有可发送的文本');
-    return 0;
-  }
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    notify('未连接，文本发送失败');
-    return 0;
-  }
-  if (!controlEnabled.checked) {
-    notify('远程控制已停用，文本未发送');
-    return 0;
-  }
-  const codepoints = Array.from(text);
-  for (let i = 0; i < codepoints.length; i += TEXT_CHUNK_CODEPOINTS) {
-    send({ type: 'type_text', text: codepoints.slice(i, i + TEXT_CHUNK_CODEPOINTS).join('') });
-  }
-  return codepoints.length;
+function sendText(text) {
+  const reason = inputBlockReason();
+  if (reason) return Promise.reject(new Error(reason));
+  return textSender.send(text).then(() => {
+    lastSubmittedText = text;
+    document.querySelectorAll('[data-restore-text]').forEach((button) => { button.disabled = false; });
+  });
 }
 
-function sendBulkFrom(input) {
-  const count = sendTextInChunks(input.value);
-  if (count) notify(`已发送 ${count} 个字符`);
+function settleTextRequest(payload) { textSender.settle(payload); }
+
+async function sendBulkFrom(input) {
+  if (input.dataset.sending === 'true') return;
+  input.dataset.sending = 'true';
+  const text = input.value;
+  const button = input === bulkTextInput ? sendBulkText : kbdBulkSend;
+  const originalLabel = button.textContent;
+  button.textContent = '发送中…';
+  refreshControlState();
+  try {
+    await sendText(text);
+    notify(`已提交 ${Array.from(text).length} 个字符到 Mac 输入服务`);
+  } catch (error) {
+    notify(`${error.message}；原文已保留`);
+  } finally {
+    delete input.dataset.sending;
+    button.textContent = originalLabel;
+    refreshControlState();
+  }
 }
 
 // ⌘/Ctrl+Enter 快速发送（textarea 内 Enter 保留换行语义）
@@ -1478,6 +1520,23 @@ kbdBulkClear.addEventListener('click', () => {
   kbdBulkInput.value = '';
   updateKbdBulkCount();
   kbdBulkInput.focus();
+});
+
+document.querySelectorAll('[data-restore-text]').forEach((button) => {
+  button.addEventListener('click', () => {
+    if (!lastSubmittedText) return;
+    if (button.dataset.restoreText === 'desktop') {
+      bulkTextInput.value = lastSubmittedText;
+      bulkTextInput.focus();
+    } else {
+      kbdBulk.hidden = false;
+      kbdBulkBtn.classList.add('active');
+      kbdBulkInput.value = lastSubmittedText;
+      updateKbdBulkCount();
+      kbdBulkInput.focus();
+    }
+    notify('已恢复上次文本到编辑框；检查 Mac 后可手动发送');
+  });
 });
 
 // ---------- 视图操作与全屏 ----------
@@ -1552,6 +1611,8 @@ document.addEventListener('fullscreenchange', () => {
 
 dockModeBtn.addEventListener('click', () => setTouchMode(touchMode === 'trackpad' ? 'direct' : 'trackpad'));
 dockKeyboardBtn.addEventListener('click', () => (kbdPanel.hidden ? openKeyboard() : closeKeyboard()));
+$('desktopKeyboardBtn').addEventListener('click', () => (kbdPanel.hidden ? openKeyboard() : closeKeyboard()));
+$('stageKeyboardBtn').addEventListener('click', () => (kbdPanel.hidden ? openKeyboard() : closeKeyboard()));
 dockRightClickBtn.addEventListener('click', () => {
   send({ type: 'click', ...cursor, button: 'right', count: 1, modifiers: takeModifiers() });
   cursorPulse();
@@ -1576,12 +1637,10 @@ function updateDockHeight() {
 
 // ---------- 手势引导 ----------
 
-function openGestureGuide() {
-  gestureGuide.hidden = false;
-}
+function openGestureGuide() { showModal(gestureGuide, gestureGuideClose); }
 
 function closeGestureGuide() {
-  gestureGuide.hidden = true;
+  hideModal(gestureGuide);
   try {
     localStorage.setItem('gestureGuideSeen', '1');
   } catch {
@@ -1597,16 +1656,84 @@ gestureHelpBtn.addEventListener('click', openGestureGuide);
 
 // ---------- 其它 UI ----------
 
-copyLinkBtn.addEventListener('click', async () => {
-  const shareUrl = new URL(window.location.href);
-  shareUrl.searchParams.set('token', token);
+async function copyAccessLink() {
+  if (!token) { notify('请先输入连接密钥'); return; }
+  const lanUrl = accessUrls.find((value) => {
+    try { return !['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname); } catch { return false; }
+  });
+  const shareUrl = new URL(window.location.protocol === 'https:' ? window.location.href : lanUrl || window.location.href);
+  shareUrl.searchParams.delete('token');
+  shareUrl.hash = new URLSearchParams({ token }).toString();
+  const link = shareUrl.toString();
   try {
-    await navigator.clipboard.writeText(shareUrl.toString());
-    notify('已复制控制台地址');
+    await navigator.clipboard.writeText(link);
+    notify('已复制连接地址；持有地址的人可控制这台 Mac');
   } catch {
-    log(shareUrl.toString());
+    // HTTP LAN origins often have no Clipboard API. Offer selectable text in
+    // a deliberate sharing dialog instead of leaking the credential into logs.
+    $('shareLinkInput').value = link;
+    showModal($('shareModal'), $('shareLinkInput'));
+    $('shareLinkInput').select();
+  }
+}
+copyLinkBtn.addEventListener('click', copyAccessLink);
+$('stageCopyLinkBtn').addEventListener('click', copyAccessLink);
+$('shareModalClose').addEventListener('click', () => hideModal($('shareModal')));
+
+accessChangeBtn.addEventListener('click', () => {
+  connection.stop();
+  connection.authFailed = true;
+  setConnection('auth', '更换连接密钥', '粘贴 Mac 提供的连接地址或密钥。');
+  accessInput.focus();
+});
+accessForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const nextToken = accessTokenFrom(accessInput.value);
+  if (!nextToken) {
+    connOverlayText.textContent = '未找到连接密钥，请粘贴完整连接地址或密钥。';
+    return;
+  }
+  token = nextToken;
+  accessInput.value = '';
+  try { sessionStorage.setItem('localRemoteToken', token); } catch {}
+  connection.authFailed = false;
+  reconnectNow();
+});
+
+let modalOpener = null;
+function showModal(modal, focusTarget) {
+  resetInteractions();
+  modalOpener = document.activeElement;
+  modal.hidden = false;
+  focusTarget?.focus();
+}
+function hideModal(modal) {
+  modal.hidden = true;
+  modalOpener?.focus?.();
+  modalOpener = null;
+}
+document.addEventListener('keydown', (event) => {
+  const modal = Array.from(document.querySelectorAll('.modal-backdrop')).find((el) => !el.hidden);
+  if (!modal) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    if (modal === gestureGuide) closeGestureGuide();
+    else hideModal(modal);
+  } else if (event.key === 'Tab') {
+    const focusable = Array.from(modal.querySelectorAll('button:not(:disabled), input, textarea, [tabindex="0"]')).filter((el) => el.getClientRects().length);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   }
 });
+
+async function readResponse(response) {
+  if (response.status === 401 || response.status === 403) throw new Error('连接密钥无效，请更换连接密钥');
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
+  return payload;
+}
 
 function authHeaders(extra = {}) {
   return { ...extra, Authorization: `Bearer ${token}` };
@@ -1618,16 +1745,16 @@ async function runAuthAction(action) {
     headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ action }),
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || '授权动作失败');
+  const payload = await readResponse(response);
   updateStatus(payload);
   authModalStatus.textContent = permissionLabel.textContent;
 }
 
 function openAuthModal() {
-  authModal.hidden = false;
+  showModal(authModal, authModalClose);
+  authModalStatus.textContent = '正在检测权限…';
   fetch('/api/permissions/status', { headers: authHeaders() })
-    .then((res) => res.json())
+    .then(readResponse)
     .then((payload) => {
       updateStatus(payload);
       authModalStatus.textContent = permissionLabel.textContent;
@@ -1638,13 +1765,14 @@ function openAuthModal() {
 }
 
 authGuideBtn.addEventListener('click', openAuthModal);
+streamHelpBtn.addEventListener('click', openAuthModal);
 // 移动端 topbar-actions 隐藏，权限异常标签兼作授权引导入口
 permissionLabel.addEventListener('click', openAuthModal);
 authModalClose.addEventListener('click', () => {
-  authModal.hidden = true;
+  hideModal(authModal);
 });
 authModal.addEventListener('click', (event) => {
-  if (event.target === authModal) authModal.hidden = true;
+  if (event.target === authModal) hideModal(authModal);
 });
 
 document.querySelectorAll('[data-auth-action]').forEach((button) => {
@@ -1674,75 +1802,75 @@ reconnectNowBtn.addEventListener('click', () => {
 // 页面隐藏/离开时释放所有按下的鼠标状态，防止 Mac 端左键永久卡死。
 // 走 sendRaw 绕过 controlEnabled 门控——释放消息属于安全消息，任何时候都应发出。
 function releasePressedButtons() {
-  const buttons = new Set();
-  if (dragLocked) {
-    dragLocked = false;
-    dockDragBtn.classList.remove('active');
-    buttons.add('left');
-    log('已自动释放拖拽锁定');
-  }
-  if (touchDragging) {
-    touchDragging = false;
-    buttons.add('left');
-  }
-  if (desktopButtonDown) {
-    buttons.add(desktopButtonDown);
-    desktopButtonDown = null;
-  }
-  if (!buttons.size) return;
+  const held = dragLocked || touchDragging || desktopButtonDown;
+  dragLocked = false;
+  touchDragging = false;
+  desktopButtonDown = null;
+  desktopPan = null;
+  dockDragBtn.classList.remove('active');
   remoteCursor.classList.remove('dragging');
-  flushMove();
-  for (const button of buttons) {
-    sendRaw({ type: 'pointer_up', ...cursor, button });
-  }
+  if (held) sendRaw({ type: 'release_inputs' });
   positionRemoteCursor();
 }
 
-// 关闭“启用远程控制”前先释放按下状态，避免关闭后释放消息被门控丢弃
-controlEnabled.addEventListener('change', () => {
-  if (!controlEnabled.checked) releasePressedButtons();
-});
+function resetInteractions() {
+  cancelMomentum();
+  clearTimeout(moveTimer);
+  moveTimer = null;
+  pendingMove = null;
+  cancelLongPress();
+  clearDirectHold();
+  hideTouchFeedback();
+  keyRepeatStops.forEach((stop) => stop());
+  touches.clear();
+  twoFinger = null;
+  panPointerId = null;
+  dragArmed = false;
+  dragReady = false;
+  suppressTap = true;
+  clickTrack = { time: 0, x: 0, y: 0, count: 0 };
+  clearStickyModifiers();
+  releasePressedButtons();
+}
+
+function changeControlEnabled() {
+  if (!controlEnabled.checked) resetInteractions();
+  refreshControlState();
+}
+controlEnabled.addEventListener('change', changeControlEnabled);
+function toggleControl() {
+  controlEnabled.checked = !controlEnabled.checked;
+  changeControlEnabled();
+  notify(controlEnabled.checked ? '远程控制已恢复' : '已暂停控制，可继续查看画面');
+}
+controlToggleBtn.addEventListener('click', toggleControl);
+$('stageControlBtn').addEventListener('click', toggleControl);
 
 function handleReturnToForeground() {
+  if (connection.authFailed) return;
   keepAwake();
-  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-    // 切后台期间连接已断：跳过退避立即重连
-    reconnectNow();
-  } else if (ws.readyState === WebSocket.OPEN) {
-    // 连接看似存活也要探活，识别 iOS 回前台后的僵尸连接
-    probeConnection();
-  }
+  if (!connection.isOpen) reconnectNow();
+  else probeConnection();
   requestAnimationFrame(positionRemoteCursor);
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') {
-    cancelMomentum();
-    releasePressedButtons();
-    return;
-  }
+  if (document.visibilityState === 'hidden') { resetInteractions(); return; }
   handleReturnToForeground();
 });
-
-// iOS 从 bfcache 恢复时不触发 visibilitychange，用 pageshow 兜底
+window.addEventListener('blur', resetInteractions);
 window.addEventListener('pageshow', (event) => {
   if (event.persisted) handleReturnToForeground();
 });
-
 window.addEventListener('online', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) reconnectNow();
+  if (!connection.isOpen && !connection.authFailed) reconnectNow();
 });
-
-// iOS Safari 基本不触发 beforeunload，pagehide 才是移动端可靠的离开事件
-window.addEventListener('pagehide', () => {
-  releasePressedButtons();
-  ws?.close();
+window.addEventListener('offline', () => {
+  connection.stop();
+  setConnection('closed', '网络已断开', '请连接到 Mac 所在的局域网，网络恢复后会自动重连。');
 });
-
-window.addEventListener('beforeunload', () => {
-  releasePressedButtons();
-  ws?.close();
-});
+window.addEventListener('pagehide', () => connection.stop());
+window.addEventListener('beforeunload', () => connection.stop());
 
 // 惯性滚动期间任何按下（画面/dock 等）立即截停；同时记录“本次触摸是为截停惯性”，
 // 供 handleTouchDown 吞掉截停轻点（截停不应产生点击）。此捕获监听先于 canvas 处理器执行。
@@ -1755,15 +1883,9 @@ document.addEventListener(
   { capture: true },
 );
 
-// 用户手势时启动屏幕保活：挂在 pointerup（触屏 pointerdown 不授予 user activation，
-// 视频 play 会被拒），成功后再移除监听，失败则下一次手势自动重试
-const keepAwakeOnGesture = async () => {
-  await keepAwake();
-  if (wakeLockSentinel || (keepAwakeVideo && !keepAwakeVideo.paused)) {
-    document.removeEventListener('pointerup', keepAwakeOnGesture);
-  }
-};
-document.addEventListener('pointerup', keepAwakeOnGesture);
+// Make one initial request, then rely on foreground recovery instead of
+// repeatedly asking after every tap when the browser does not support it.
+document.addEventListener('pointerup', keepAwake, { once: true });
 
 // ---------- 布局变化：光标重定位 / dock 高度 ----------
 
@@ -1813,13 +1935,35 @@ try {
   setKbdCompact(false, false);
 }
 
-// 移动端首次访问显示手势引导
-if (isCoarsePointer) {
-  try {
-    if (!localStorage.getItem('gestureGuideSeen')) openGestureGuide();
-  } catch {
-    // localStorage 不可用时跳过引导
-  }
-}
-
+textSender = new TextSender({ send });
+connection = new RemoteConnection({
+  token,
+  onState: setConnection,
+  onStatus: updateStatus,
+  onFrame(buffer) {
+    frameCount += 1;
+    byteCount += buffer.byteLength;
+    drawFrame(buffer);
+  },
+  onInputResult: settleTextRequest,
+  onError(payload) {
+    settleTextRequest(payload);
+    resetInteractions();
+    const message = payload.message || '操作未完成，请稍后重试';
+    if (message !== lastInputError) notify(message);
+    lastInputError = message;
+    setTimeout(() => { if (lastInputError === message) lastInputError = ''; }, 2000);
+  },
+  onReset() {
+    textSender.reset();
+    resetInteractions();
+    frameGeneration += 1;
+    pendingFrame = null;
+    hasFrame = false;
+    latestStatus = null;
+    screenWrap.classList.add('stream-unavailable');
+    frameCount = 0;
+    byteCount = 0;
+  },
+});
 connect();
