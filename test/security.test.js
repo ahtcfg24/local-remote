@@ -44,8 +44,12 @@ test('persisted token creation is private, stable and does not overwrite a corru
   const file = join(root, 'private', 'token');
   const first = await loadAccessToken(file);
   assert.equal(await loadAccessToken(file), first);
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
-  assert.equal((await stat(join(root, 'private'))).mode & 0o777, 0o700);
+  // Windows protects the service directory with NTFS ACLs in start.ps1;
+  // stat/chmod expose only its writable bit, not POSIX ownership permissions.
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(root, 'private'))).mode & 0o777, 0o700);
+  }
   await writeFile(file, 'invalid-secret');
   await assert.rejects(loadAccessToken(file), /invalid/);
   assert.equal(await readFile(file, 'utf8'), 'invalid-secret');

@@ -52,16 +52,16 @@ export class RemoteConnection {
     if (this.stopped) return;
     if (!this.token || this.authFailed) {
       this.onState('auth', '需要连接密钥', this.authFailed
-        ? '连接密钥已失效，请从 Mac 获取新的连接地址或密钥。'
-        : '扫描 Mac 上的二维码，或粘贴连接地址 / 密钥。');
+        ? '连接密钥已失效，请从 远程电脑 获取新的连接地址或密钥。'
+        : '扫描 远程电脑 上的二维码，或粘贴连接地址 / 密钥。');
       return;
     }
     if (navigator.onLine === false) {
-      this.onState('closed', '网络已断开', '请连接到 Mac 所在的局域网，网络恢复后会自动重连。');
+      this.onState('closed', '网络已断开', '请连接到 远程电脑 所在的局域网，网络恢复后会自动重连。');
       return;
     }
     const generation = this.generation;
-    this.onState('connecting', '连接中', '正在连接 Mac…');
+    this.onState('connecting', '连接中', '正在连接 远程电脑…');
     const controller = new AbortController();
     this.controller = controller;
     const fetchTimer = setTimeout(() => controller.abort(), 8000);
@@ -76,7 +76,7 @@ export class RemoteConnection {
       if (generation !== this.generation) return;
       if (response.status === 401 || response.status === 403) {
         this.authFailed = true;
-        this.onState('auth', '连接密钥无效', '请从 Mac 获取新的连接地址或密钥，然后重新连接。');
+        this.onState('auth', '连接密钥无效', '请从 远程电脑 获取新的连接地址或密钥，然后重新连接。');
         return;
       }
       if (!response.ok) throw new Error(response.status === 503 ? '连接人数已满，请稍后重试。' : `服务暂不可用（${response.status}）`);
@@ -90,8 +90,8 @@ export class RemoteConnection {
     } catch (error) {
       if (generation !== this.generation) return;
       this.scheduleRetry(error.name === 'AbortError'
-        ? '连接超时，请确认 Mac 已开机、服务已启动，且两台设备在同一局域网。'
-        : error.message === 'Failed to fetch' ? '无法连接 Mac，正在重试。请检查局域网和服务状态。' : error.message);
+        ? '连接超时，请确认 远程电脑 已开机、服务已启动，且两台设备在同一局域网。'
+        : error.message === 'Failed to fetch' ? '无法连接 远程电脑，正在重试。请检查局域网和服务状态。' : error.message);
     } finally {
       clearTimeout(fetchTimer);
       if (this.controller === controller) this.controller = null;

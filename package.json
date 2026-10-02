@@ -1,7 +1,7 @@
 {
   "name": "local-remote",
   "version": "1.0.0",
-  "description": "Open-source, mobile-first LAN remote control for macOS.",
+  "description": "Open-source, mobile-first LAN remote control for macOS and Windows.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -11,17 +11,20 @@
   "bugs": "https://github.com/ahtcfg24/local-remote/issues",
   "type": "module",
   "scripts": {
-    "build:native": "./scripts/build-native.sh",
+    "build:native": "node scripts/native-tool.mjs build",
     "test": "node --test",
-    "test:native": "\".build/Local Remote Agent.app/Contents/MacOS/local-remote-agent\" --self-test",
+    "test:native": "node scripts/native-tool.mjs test",
     "check": "npm test && npm run build:native && npm run test:native",
-    "bg": "./remote.sh start",
-    "guide": "./remote.sh guide",
-    "stop": "./remote.sh stop",
-    "restart": "./remote.sh restart",
-    "status": "./remote.sh status",
-    "logs": "./remote.sh logs",
-    "start": "npm run build:native && node server.js"
+    "bg": "node scripts/service-tool.mjs start",
+    "guide": "node scripts/service-tool.mjs guide",
+    "stop": "node scripts/service-tool.mjs stop",
+    "restart": "node scripts/service-tool.mjs restart",
+    "status": "node scripts/service-tool.mjs status",
+    "logs": "node scripts/service-tool.mjs logs",
+    "start": "npm run build:native && node server.js",
+    "windows:start": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File start.ps1 start",
+    "windows:status": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File start.ps1 status",
+    "windows:stop": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File start.ps1 stop"
   },
   "dependencies": {
     "express": "^5.2.1",

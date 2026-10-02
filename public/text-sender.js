@@ -1,4 +1,4 @@
-// A transport acknowledgement means the Mac input service accepted a complete
+// A transport acknowledgement means the 远程电脑 input service accepted a complete
 // message. A timeout is deliberately uncertain: replay could type it twice.
 export class TextSender {
   constructor({ send, timeoutMs = 6000 }) {
@@ -15,7 +15,7 @@ export class TextSender {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error('发送结果未确认，文字可能已到达 Mac'));
+        reject(new Error('发送结果未确认，文字可能已到达 远程电脑'));
       }, this.timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       let sent = false;
@@ -35,13 +35,13 @@ export class TextSender {
     this.pending.delete(payload.requestId);
     clearTimeout(pending.timer);
     if (payload.type === 'input_result' && payload.accepted === true) pending.resolve();
-    else pending.reject(new Error(payload.message || 'Mac 未接受这段文字'));
+    else pending.reject(new Error(payload.message || '远程电脑 未接受这段文字'));
   }
 
   reset() {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error('连接中断，发送结果未确认；请检查 Mac 后再重试'));
+      pending.reject(new Error('连接中断，发送结果未确认；请检查 远程电脑 后再重试'));
     }
     this.pending.clear();
   }

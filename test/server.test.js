@@ -15,7 +15,7 @@ const token = 'isolated-test-secret';
 const baseStatus = { type: 'status', width: 1440, height: 900, fps: 15, capturing: true, screenRecording: true, accessibilityTrusted: true };
 
 class FakeAgent extends EventEmitter {
-  constructor(status = {}) {
+  constructor(status = {}, autoAck = true) {
     super();
     this.stdin = new PassThrough();
     this.stdout = new PassThrough();
@@ -32,6 +32,7 @@ class FakeAgent extends EventEmitter {
         this.commands.push(command);
         this.emit('command', command);
         if (command.cmd === 'status') queueMicrotask(() => this.packet(0x4a, JSON.stringify(this.status)));
+        if (autoAck && command.cmd === 'text' && command.id) queueMicrotask(() => this.packet(0x4a, JSON.stringify({ type: 'command_ack', id: command.id, cmd: command.cmd, ok: true })));
       }
     });
     this.stdin.on('finish', () => this.kill());
@@ -68,8 +69,8 @@ async function fixture(t, options = {}) {
   const workers = [];
   const remote = createRemoteServer({
     config: { host: '127.0.0.1', port: 0, fps: 15, quality: 0.6, maxWidth: 1920, maxClients: 4 },
-    token, rootDir, runDir,
-    spawnProcess: () => { const worker = new FakeAgent(options.status); workers.push(worker); return worker; },
+    token, rootDir, runDir, platform: 'darwin',
+    spawnProcess: () => { const worker = new FakeAgent(options.status, options.autoAck); workers.push(worker); return worker; },
     logger: { error() {} }, restartMinMs: 20, restartMaxMs: 50,
     ...options,
   });
@@ -157,6 +158,8 @@ test('server heartbeat reaps silent sockets and releases held input', async (t) 
   const client = await connect(t, origin, { autoPong: false });
   client.ws.send(JSON.stringify({ type: 'pointer_down', x: 20, y: 30 }));
   await once(client.ws, 'close');
+  // The peer's close event can arrive before the server's close handler runs.
+  await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'releaseInputs'));
   assert.ok(workers[0].commands.some((command) => command.cmd === 'releasePointers'));
   assert.ok(workers[0].commands.some((command) => command.cmd === 'releaseInputs'));
 });
@@ -229,6 +232,29 @@ test('capture loss releases ownership so recovery does not leave other viewers p
   assert.equal(remote.statusPayload().capturing, false);
 });
 
+test('native input errors clear queued drag ownership without cancelling another viewer text', async (t) => {
+  const { origin, workers, remote } = await fixture(t, { platform: 'win32', autoAck: false });
+  const first = await connect(t, origin);
+  const second = await connect(t, origin);
+  second.ws.send(JSON.stringify({ type: 'type_text', text: 'accepted text', requestId: 'keep-text' }));
+  await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'text'));
+  first.ws.send(JSON.stringify({ type: 'pointer_down', x: 20, y: 30 }));
+  await waitUntil(() => remote.statusPayload().control.busy);
+  workers[0].packet(0x4a, JSON.stringify({ type: 'error', message: 'Windows ignored the requested pointer move' }));
+  await waitUntil(() => second.messages.some((message) => message.code === 'agent_error'));
+  assert.equal(remote.statusPayload().control.busy, false);
+  assert.ok(workers[0].commands.some((command) => command.cmd === 'releasePointers'));
+  assert.equal(workers[0].commands.some((command) => command.cmd === 'releaseInputs'), false);
+  const textCommand = workers[0].commands.find((command) => command.cmd === 'text');
+  workers[0].packet(0x4a, JSON.stringify({ type: 'command_ack', id: textCommand.id, cmd: 'text', ok: true }));
+  await waitUntil(() => second.messages.some((message) => message.requestId === 'keep-text' && message.accepted));
+  first.ws.send(JSON.stringify({ type: 'pointer_up', x: 20, y: 30 }));
+  second.ws.send(JSON.stringify({ type: 'click', x: 60, y: 70 }));
+  await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'click'));
+  assert.equal(workers[0].commands.some((command) => command.cmd === 'up'), false);
+  assert.equal(second.messages.some((message) => message.code === 'control_busy'), false);
+});
+
 test('the last viewer disconnect cancels outstanding native text even without a pressed mouse button', async (t) => {
   const { origin, workers } = await fixture(t);
   const client = await connect(t, origin);
@@ -236,4 +262,66 @@ test('the last viewer disconnect cancels outstanding native text even without a 
   await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'text'));
   client.ws.terminate();
   await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'releaseInputs'));
+});
+
+test('Windows status describes its desktop session and rejects macOS-only permission actions', async (t) => {
+  const { origin, info, workers } = await fixture(t, { platform: 'win32', status: {
+    sessionID: 1, interactiveSession: true, inputDesktop: 'Default', inputAvailable: true,
+  } });
+  const status = await (await info()).json();
+  assert.equal(status.platform, 'win32');
+  assert.equal(status.platformName, 'Windows');
+  assert.equal(status.capabilities.permissionGuide, false);
+  assert.deepEqual(status.session, { id: 1, interactive: true, inputDesktop: 'Default', inputAvailable: true });
+  const action = (value) => fetch(`${origin}/api/permissions/guide`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: value }),
+  });
+  assert.equal((await action('open_guide')).status, 200);
+  assert.equal((await action('trigger_accessibility_prompt')).status, 400);
+  assert.equal(workers[0].commands.some((command) => command.cmd === 'promptAccessibility'), false);
+});
+
+test('Windows text succeeds only after its native execution ACK and forwards native failures to the right viewer', async (t) => {
+  const { origin, workers } = await fixture(t, { platform: 'win32', autoAck: false });
+  const first = await connect(t, origin);
+  const second = await connect(t, origin);
+  const send = (client, text) => client.ws.send(JSON.stringify({ type: 'type_text', text, requestId: 'shared-browser-id' }));
+  send(first, '中文😀\nfirst');
+  send(second, 'second');
+  await waitUntil(() => workers[0].commands.filter((command) => command.cmd === 'text').length === 2);
+  const commands = workers[0].commands.filter((command) => command.cmd === 'text');
+  assert.notEqual(commands[0].id, commands[1].id);
+  assert.equal(first.messages.some((message) => message.type === 'input_result'), false);
+  workers[0].packet(0x4a, JSON.stringify({ type: 'command_ack', id: 'unrelated', cmd: 'text', ok: true }));
+  workers[0].packet(0x4a, JSON.stringify({ type: 'command_ack', id: commands[0].id, cmd: 'text', ok: true }));
+  workers[0].packet(0x4a, JSON.stringify({ type: 'command_ack', id: commands[1].id, cmd: 'text', ok: false, error: 'SendInput failed' }));
+  await waitUntil(() => first.messages.some((message) => message.type === 'input_result'));
+  await waitUntil(() => second.messages.some((message) => message.code === 'native_input_failed'));
+  assert.equal(first.messages.some((message) => message.code === 'native_input_failed'), false);
+  assert.equal(second.messages.some((message) => message.type === 'input_result'), false);
+  assert.equal(second.messages.find((message) => message.code === 'native_input_failed').requestId, 'shared-browser-id');
+});
+
+test('Windows native restart rejects pending text without replaying uncertain input', async (t) => {
+  const { origin, workers } = await fixture(t, { platform: 'win32', autoAck: false });
+  const client = await connect(t, origin);
+  client.ws.send(JSON.stringify({ type: 'type_text', text: 'uncertain', requestId: 'pending' }));
+  await waitUntil(() => workers[0].commands.some((command) => command.cmd === 'text'));
+  workers[0].kill();
+  await waitUntil(() => client.messages.some((message) => message.code === 'native_input_failed'));
+  await waitUntil(() => workers.length === 2);
+  assert.equal(workers[1].commands.some((command) => command.cmd === 'text'), false);
+});
+
+test('Windows native ACK timeout reports an uncertain result and ignores a late success without replay', async (t) => {
+  const { origin, workers } = await fixture(t, { platform: 'win32', autoAck: false, nativeAckTimeoutMs: 20 });
+  const client = await connect(t, origin);
+  client.ws.send(JSON.stringify({ type: 'type_text', text: 'slow native text', requestId: 'slow' }));
+  await waitUntil(() => client.messages.some((message) => message.code === 'native_input_failed'));
+  assert.match(client.messages.find((message) => message.code === 'native_input_failed').message, /响应超时.*结果未确认/);
+  const command = workers[0].commands.find((message) => message.cmd === 'text');
+  workers[0].packet(0x4a, JSON.stringify({ type: 'command_ack', id: command.id, cmd: 'text', ok: true }));
+  await delay(20);
+  assert.equal(client.messages.some((message) => message.type === 'input_result'), false);
+  assert.equal(workers[0].commands.filter((message) => message.cmd === 'text').length, 1);
 });

@@ -17,7 +17,7 @@
       <header class="topbar">
         <div class="topbar-title">
           <h1>局域网远程控制</h1>
-          <span class="topbar-hint">连接到你的 Mac · 仅限可信局域网</span>
+          <span class="topbar-hint" id="platformHint">连接到你的电脑 · 仅限可信局域网</span>
         </div>
         <div class="status-strip" aria-live="polite">
           <span id="connectionDot" class="dot" data-state="connecting"></span>
@@ -39,16 +39,16 @@
         <div class="screen-wrap" id="screenWrap">
           <canvas id="screen" width="1280" height="720" tabindex="0" aria-label="远程屏幕"></canvas>
           <div id="remoteCursor" class="remote-cursor" aria-hidden="true"></div>
-          <div id="emptyState" class="empty-state" role="status">正在连接 Mac…</div>
+          <div id="emptyState" class="empty-state" role="status">正在连接 远程电脑…</div>
           <button id="streamHelpBtn" class="stream-help" type="button" hidden>打开授权引导</button>
           <!-- 断线遮罩：断开后画面静止，需要显著提示与手动重连入口 -->
           <div id="connOverlay" class="conn-overlay" hidden>
             <div class="conn-overlay-text" id="connOverlayText" role="status">连接已断开</div>
             <form id="accessForm" class="access-form" hidden>
               <label for="accessInput">连接地址或密钥</label>
-              <input id="accessInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 Mac 提供的地址或密钥" required />
-              <button type="submit">连接 Mac</button>
-              <p>在 Mac 上运行 ./start.sh status 可查看连接地址。</p>
+              <input id="accessInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="粘贴 远程电脑 提供的地址或密钥" required />
+              <button type="submit">连接 远程电脑</button>
+              <p id="accessHelp">在远程电脑运行启动脚本的 status 命令可查看连接地址。</p>
             </form>
             <div class="button-row">
               <button id="reconnectNowBtn" type="button">立即重连</button>
@@ -146,7 +146,7 @@
 
         <div class="tool-section">
           <div class="section-title">发送文本</div>
-          <textarea id="bulkTextInput" rows="3" aria-label="发送到 Mac 的文本" placeholder="输入后点击发送到本机前台应用"></textarea>
+          <textarea id="bulkTextInput" rows="3" aria-label="发送到 远程电脑 的文本" placeholder="输入后点击发送到本机前台应用"></textarea>
           <div class="button-row">
             <button id="sendBulkText" type="button">发送文本</button>
             <button id="clearBulkText" type="button" class="ghost">清空</button>
@@ -177,7 +177,7 @@
         <div class="kbd-head">
           <input
             id="imeInput"
-            aria-label="输入确认后立即发送到 Mac"
+            aria-label="输入确认后立即发送到 远程电脑"
             type="text"
             maxlength="2000"
             placeholder="输入即发送，支持中文"
@@ -198,9 +198,9 @@
         <div class="kbd-bulk" id="kbdBulk" hidden>
           <textarea
             id="kbdBulkInput"
-            aria-label="发送到 Mac 的长文本"
+            aria-label="发送到 远程电脑 的长文本"
             rows="3"
-            placeholder="粘贴或输入长文本，整段发送到 Mac 前台应用"
+            placeholder="粘贴或输入长文本，整段发送到 远程电脑 前台应用"
             autocomplete="off"
             autocapitalize="off"
             autocorrect="off"
@@ -255,7 +255,7 @@
           <header class="modal-head">
             <div>
               <h2 id="shareModalTitle">分享连接地址</h2>
-              <p>长按或全选后复制。持有这个地址的人可控制这台 Mac。</p>
+              <p>长按或全选后复制。持有这个地址的人可控制这台 远程电脑。</p>
             </div>
             <button id="shareModalClose" class="icon-button" type="button" aria-label="关闭">×</button>
           </header>
@@ -273,7 +273,7 @@
             </div>
             <button id="authModalClose" type="button" class="icon-button" aria-label="关闭">×</button>
           </header>
-          <div class="auth-steps">
+          <div class="auth-steps" id="macAuthSteps">
             <div class="auth-step">
               <div>
                 <strong>屏幕录制</strong>
@@ -295,8 +295,22 @@
               </div>
             </div>
           </div>
+          <div class="auth-steps" id="windowsAuthSteps" hidden>
+            <div class="auth-step">
+              <div>
+                <strong>桌面会话</strong>
+                <span>服务需要在 Windows 已登录的桌面中运行。锁屏和 UAC 安全桌面期间会暂停控制，解锁后自动恢复。</span>
+              </div>
+            </div>
+            <div class="auth-step">
+              <div>
+                <strong>输入权限</strong>
+                <span>普通权限的服务可控制普通应用。管理员权限的窗口需要以管理员身份运行服务。</span>
+              </div>
+            </div>
+          </div>
           <footer class="modal-actions">
-            <button data-auth-action="open_guide" type="button">打开拖拽弹窗</button>
+            <button data-auth-action="open_guide" id="openGuideBtn" type="button">打开拖拽弹窗</button>
             <button data-auth-action="recheck" type="button" class="ghost">重新检测</button>
           </footer>
         </section>

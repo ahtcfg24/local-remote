@@ -63,7 +63,7 @@ function runLauncher(body) {
   return result.stdout.trim().split('\n');
 }
 
-test('default start keeps a healthy installed service running', () => {
+test('default start keeps a healthy installed service running', { skip: process.platform !== 'darwin' }, () => {
   const calls = runLauncher(`
     detect_service_backend() { echo launchd; }
     load_installed_environment() { return 0; }
@@ -78,7 +78,7 @@ test('default start keeps a healthy installed service running', () => {
   assert.ok(!calls.includes('unexpected-build'));
 });
 
-test('restart builds before stopping and checks the fixed port after stopping', () => {
+test('restart builds before stopping and checks the fixed port after stopping', { skip: process.platform !== 'darwin' }, () => {
   const calls = runLauncher(`
     RESTART_REQUESTED=1
     detect_service_backend() { echo launchd; }
@@ -96,7 +96,7 @@ test('restart builds before stopping and checks the fixed port after stopping', 
   assert.deepEqual(calls, ['prepare', 'stop', 'legacy', 'port', 'install', 'start', 'health']);
 });
 
-test('port conflict never installs a service on a silently changed port', () => {
+test('port conflict never installs a service on a silently changed port', { skip: process.platform !== 'darwin' }, () => {
   const result = spawnSync('bash', ['-c', `
     source ./start.sh
     RESTART_REQUESTED=1
@@ -115,7 +115,7 @@ test('port conflict never installs a service on a silently changed port', () => 
   assert.ok(!result.stdout.includes('unexpected-stop'));
 });
 
-test('launchd is enabled before bootstrap so a disabled installed service can recover', () => {
+test('launchd is enabled before bootstrap so a disabled installed service can recover', { skip: process.platform !== 'darwin' }, () => {
   const calls = runLauncher(`
     launchctl() { echo "$1"; }
     start_service_backend

@@ -37,6 +37,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     onInfo: process.argv.includes('--details') ? (info) => {
       const screen = info.permissions.screenRecording === 'ok';
       const input = info.permissions.accessibility === 'ok';
+      if (info.platform === 'win32' || process.platform === 'win32') {
+        console.log(`[start] 桌面采集${screen ? '可用' : '不可用'}；输入控制${input ? '可用' : '不可用'}；${info.capturing ? '画面采集中' : '尚无画面'}`);
+        if (!screen || !input || !info.capturing) console.log('[start] 请确认 Windows 用户已登录且桌面未锁定；使用 start.ps1 的交互式计划任务运行。登录界面、UAC 安全桌面和高权限应用无法通过普通权限任务控制。');
+        return;
+      }
       console.log(`[start] 录屏${screen ? '已授权' : '待授权'}；辅助功能${input ? '已授权' : '待授权'}；${info.capturing ? '画面采集中' : '尚无画面'}`);
       if (!screen || !input) console.log('[start] 请在 Mac「系统设置 → 隐私与安全性」中为 Local Remote Agent 开启屏幕录制和辅助功能。若开关已开启却仍未授权，请查看 README.zh-CN.md 中的权限重置步骤。');
     } : undefined,

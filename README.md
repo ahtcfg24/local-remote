@@ -2,27 +2,28 @@
 
 [中文](README.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-An open-source, mobile-first remote control for macOS on a trusted local network. View and control your Mac from Safari, Chrome, or another modern browser—nothing needs to be installed on the phone.
+An open-source, mobile-first remote control for macOS and Windows on a trusted local network. View and control your computer from Safari, Chrome, or another modern browser—nothing needs to be installed on the phone.
 
 > Local Remote is intentionally LAN-only. It has no TLS or account system. Never expose its port to the public internet.
 
 ## Why Local Remote?
 
 - **Phone-first control:** trackpad and direct-touch modes, drag, right-click, inertial scrolling, pinch-to-zoom, landscape view, and fullscreen.
-- **Useful keyboard support:** Chinese and other IME text, modifier keys, navigation keys, long text, and common macOS shortcuts.
-- **Low-latency native capture:** ScreenCaptureKit streams changed frames while CGEvent handles ordered mouse and keyboard input.
+- **Useful keyboard support:** Chinese and other IME text, modifier keys, navigation keys, long text, and platform-specific shortcuts.
+- **Low-latency native capture:** ScreenCaptureKit/CGEvent on macOS; Windows desktop capture and SendInput on Windows.
 - **Zero-install client:** scan the terminal QR code and use the browser already on your phone.
 - **Local and transparent:** no cloud relay, analytics, account, or third-party runtime service.
-- **Managed on macOS:** one command installs a per-user launchd service with login startup and crash recovery.
+- **Managed startup:** per-user launchd on macOS or an interactive scheduled task on Windows, with login startup and crash recovery.
 
 ## Requirements
 
-- macOS 13 or newer
+- macOS 13+ or Windows 10/11
 - Node.js 20 or newer
 - A phone or computer on the same trusted LAN
-- Screen Recording and Accessibility permissions on the Mac
+- macOS: Screen Recording and Accessibility permissions
+- Windows: .NET Framework 4.x with its C# compiler, Windows PowerShell 5.1+, and a signed-in, unlocked desktop
 
-## Quick start
+## Quick start on macOS
 
 ```bash
 git clone https://github.com/ahtcfg24/local-remote.git
@@ -72,6 +73,52 @@ tccutil reset ScreenCapture com.local-remote.agent
 
 This removes only this app's two permission decisions. Enable **Local Remote Agent** in Accessibility and Screen & System Audio Recording afterward; do not rebuild again after granting access. See [Apple's permission-reset documentation](https://developer.apple.com/documentation/xcode/resetting-access-to-protected-resources-in-macos).
 
+## Windows setup
+
+Clone or copy this repository to a folder owned by the desktop user. In an elevated Windows PowerShell window, run:
+
+```powershell
+cd C:\Users\you\local_remote
+Copy-Item .env.example .env
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 start -InstallFirewall
+```
+
+The launcher installs npm dependencies, builds `.build/local-remote-agent.exe`, and registers a task for the signed-in desktop user. The task runs with **Limited** privileges by default in the user's interactive session, starts at login, and supervises Node with crash retry. It stores no Windows password. `-InstallFirewall` requires elevation and creates one inbound TCP rule for the configured Node executable and port, **Private/Domain** network profiles, and **LocalSubnet** peers. It leaves the network category unchanged. On a Public network, switch your trusted LAN to Private through Windows settings before enabling LAN access.
+
+For a fixed address, reserve the Windows machine's address in your router, or configure a persistent static IPv4 address with the correct subnet, gateway, and DNS. Set `HOST` in `.env` to that assigned address and keep `PORT=8787`. For example, a machine assigned `192.168.1.10/24` can use:
+
+```dotenv
+HOST=192.168.1.10
+PORT=8787
+```
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 restart -InstallFirewall -FirewallRemoteAddress 192.168.1.0/24
+```
+
+This also restricts the firewall's local address to `HOST`. The launcher does not change DHCP, routing, DNS, or Windows sign-in settings. The generated 256-bit token stays fixed in `.run/token`; the installed task's effective token is saved in `.run/windows-service-token`. `.run` and `.env` have Windows access control lists restricted to the service user and SYSTEM. Changing `.env` requires `restart`; `start` leaves a healthy running task in place.
+
+```powershell
+.\start.ps1              # install/start; keep a healthy existing instance
+.\start.ps1 status       # show URLs; check HTTP, token, and native agent
+.\start.ps1 restart      # apply code/config changes and rebuild as needed
+.\start.ps1 stop         # stop now; keep login startup and token
+.\start.ps1 logs         # follow .run/local-remote.log
+.\start.ps1 doctor       # inspect task, desktop, addresses, and firewall
+.\start.ps1 uninstall    # elevated if removing the firewall rule; keep token/logs
+```
+
+For applications running as administrator, you can explicitly select the task's **Highest** run level from an elevated PowerShell window:
+
+```powershell
+.\start.ps1 restart -RunElevated
+.\start.ps1 restart -RunLimited   # return to the default privilege level
+```
+
+`-RunElevated` gives the remote service administrator privileges, so holders of its access token can control applications at that privilege level. The chosen mode persists in `.run/windows-service.json`; ordinary starts and restarts preserve it. `status` and `doctor` show the task's actual run level. The launcher never elevates automatically. Elevated mode still cannot unlock Windows or operate the UAC secure desktop.
+
+If your execution policy blocks `.ps1` files, use the `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` prefix shown above. To install through SSH, use `start` and optionally `-InteractiveUser 'COMPUTER\user'`. SSH runs in Session 0, so running `server.js` directly through SSH cannot capture or control the desktop. The scheduled task needs that user to be signed in. Windows lock/sign-in screens, UAC secure desktops, and applications running at higher integrity are unavailable to this Limited task. On an unavailable desktop, the agent reports blocked capture/control and retries when the interactive desktop returns.
+
 ## Service commands
 
 ```bash
@@ -86,7 +133,7 @@ This removes only this app's two permission decisions. Enable **Local Remote Age
 
 `./remote.sh` remains a compatibility entry point for these commands. For foreground development, use `npm start`.
 
-The configured port stays fixed: conflicts fail with an actionable error instead of silently changing the URL. DHCP can still change the Mac's address; run `./start.sh status` to retrieve current links. Logs and launchd configuration may contain access credentials, so the launcher restricts them to the current user. Opening the permission guide does not rebuild or re-sign unchanged helpers.
+The configured port stays fixed: conflicts fail with an actionable error instead of silently changing the URL. DHCP can still change the computer's address; use a router reservation or static IPv4 setting for a stable LAN URL, and run the platform's `status` command to retrieve current links. Logs and launchd configuration may contain access credentials, so the launcher restricts them to the current user. Opening the permission guide does not rebuild or re-sign unchanged helpers.
 
 ## Mobile controls
 
@@ -107,7 +154,7 @@ The first mobile visit displays an in-app gesture guide. The bottom dock exposes
 
 - The keyboard field sends text after input-method commitment. Use the long-text editor to revise drafts before sending. Local draft edits never backspace through the remote application; use the remote Backspace button for deletion.
 - Each send is limited to 4,000 UTF-16 code units. Oversized messages are rejected in full; split them manually. Failed sends preserve the text, and reconnection never automatically replays it.
-- A text acknowledgement means the complete command was handed to the native input process, not that the target application saved or finished applying it. Check the Mac before retrying an uncertain send after a disconnect or permission change.
+- A text acknowledgement means the complete command was handed to the native input process, not that the target application saved or finished applying it. Check the host before retrying an uncertain send after a disconnect or permission change.
 - **Restore last text** places the most recently submitted text back into the draft without resending it. This recovery copy is kept only in page memory and disappears on reload.
 - Multiple devices may view simultaneously. While one device holds a mouse button or drags, other devices cannot control the host. Blur, pause, disconnect, and stale-connection cleanup release held input.
 
@@ -135,10 +182,10 @@ cp .env.example .env
 ```text
 Mobile or desktop browser
   ↕ HTTP + authenticated WebSocket (JPEG frames / JSON input)
-Local Remote Agent service launcher (stable TCC responsible process)
+Per-user launchd app launcher / Windows interactive scheduled task
   ↳ Node.js server (auth, backpressure, lifecycle, static client)
   ↕ framed stdout + newline-delimited JSON stdin
-Swift agent (ScreenCaptureKit + VideoToolbox + CGEvent)
+Swift agent (ScreenCaptureKit + CGEvent) / C# agent (desktop capture + SendInput)
 ```
 
 The server discards frames for slow clients instead of building latency. It also releases pressed mouse buttons when a browser disconnects, restarts a failed native agent with backoff, validates browser WebSocket origins, and limits concurrent clients.
@@ -153,14 +200,15 @@ npm run test:native
 npm start
 ```
 
-`npm run check` runs JavaScript regressions, the Swift build, and native self-tests. HTTP/WebSocket tests use an isolated worker substitute; native self-tests do not prompt for permissions, capture the screen, or inject input. CI runs these checks on macOS. Physical phones, sleep/wake, and display hot-plug still require device testing. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before a substantial change.
+`npm run check` runs JavaScript regressions, the platform's native build, and native self-tests. HTTP/WebSocket tests use an isolated worker substitute; native self-tests do not prompt for permissions, capture the screen, or inject input. Windows checks must also run on real Windows; cross-platform JavaScript tests do not prove interactive desktop capture or input. Physical phones, sleep/wake, and display hot-plug still require device testing. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before a substantial change.
 
 ## Security and limitations
 
 - Use only on a trusted LAN; the token grants full view-and-control access.
 - There is no TLS, account system, audit log, clipboard sync, file transfer, NAT traversal, or cloud relay.
-- Only the main display is currently supported.
-- The host must be macOS; Linux and Windows are not supported.
+- macOS captures the main display; Windows can select an available display.
+- Hosts support macOS and Windows. Linux is not supported.
+- Windows requires a signed-in desktop; this tool cannot unlock Windows or control UAC secure desktops. The default Limited task cannot control elevated applications.
 - Browser capabilities differ. Wake Lock and fullscreen may require a user gesture and behave differently on iOS.
 
 See [SECURITY.md](SECURITY.md) for the trust boundary and private reporting guidance.

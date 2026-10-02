@@ -6,6 +6,7 @@
 
 import { RemoteConnection, accessTokenFrom } from './connection.js';
 import { TextSender } from './text-sender.js';
+import { remotePlatform, shortcutForPlatform } from './platform.js';
 
 // ---------- DOM 引用 ----------
 
@@ -104,6 +105,7 @@ let latestStatusError = '';
 let lastInputError = '';
 let accessUrls = [];
 let textSender;
+let targetPlatform = remotePlatform();
 let lastSubmittedText = '';
 let screenSize = { width: canvas.width, height: canvas.height };
 let cursor = { x: 640, y: 360 };
@@ -169,8 +171,9 @@ function setConnection(state, label, detail = '') {
 function inputBlockReason() {
   if (!connection?.isOpen) return '尚未连接，操作未发送';
   if (!controlEnabled.checked) return '当前仅查看，点击「恢复控制」后操作';
-  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') return 'Mac 控制服务正在恢复，请稍后操作';
-  if (latestStatus?.permissions?.accessibility !== 'ok') return 'Mac 尚未授予辅助功能权限';
+  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') return '远程控制服务正在恢复，请稍后操作';
+  if (latestStatus?.permissions?.accessibility !== 'ok') return targetPlatform.windows
+    ? 'Windows 输入服务不可用，请确认桌面已登录且未锁定' : 'Mac 尚未授予辅助功能权限';
   if (latestStatus?.capturing === false || !hasFrame) return '等待当前屏幕画面后再操作';
   return '';
 }
@@ -192,9 +195,10 @@ function refreshControlState() {
 function updateStreamState() {
   if (connectionState !== 'open') return;
   let message = '';
-  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') message = 'Mac 控制服务正在恢复…';
-  else if (latestStatus?.permissions?.screenRecording !== 'ok') message = '请在 Mac 上允许 Local Remote Agent 录制屏幕';
-  else if (latestStatus?.capturing === false) message = '屏幕采集暂不可用，正在恢复…';
+  if (latestStatus?.agent && latestStatus.agent.state !== 'ready') message = '远程控制服务正在恢复…';
+  else if (latestStatus?.permissions?.screenRecording !== 'ok') message = targetPlatform.windows
+    ? 'Windows 屏幕采集不可用，请确认桌面已登录且未锁定' : '请在 Mac 上允许 Local Remote Agent 录制屏幕';
+  else if (latestStatus?.capturing === false) message = latestStatus?.errors?.capture || '屏幕采集暂不可用，正在恢复…';
   else if (!hasFrame) message = '已连接，等待第一帧屏幕画面…';
   emptyState.textContent = message;
   emptyState.hidden = !message;
@@ -243,7 +247,36 @@ async function drawFrame(buffer, generation = frameGeneration) {
   }
 }
 
+function updatePlatform(payload) {
+  targetPlatform = remotePlatform(payload.platform);
+  const windows = targetPlatform.windows;
+  $('platformHint').textContent = `连接到你的 ${targetPlatform.name} · 仅限可信局域网`;
+  $('authModalTitle').textContent = windows ? 'Windows 连接状态' : 'macOS 授权引导';
+  $('macAuthSteps').hidden = windows;
+  $('windowsAuthSteps').hidden = !windows;
+  $('openGuideBtn').hidden = windows;
+  authGuideBtn.textContent = windows ? '连接检查' : '授权引导';
+  streamHelpBtn.textContent = windows ? '检查连接状态' : '打开授权引导';
+  $('accessHelp').textContent = windows
+    ? '在 Windows 上运行 .\\start.ps1 status 可查看连接地址。'
+    : '在 Mac 上运行 ./start.sh status 可查看连接地址。';
+  const labels = windows ? { command: 'Win', control: 'Ctrl', option: 'Alt', shift: 'Shift' }
+    : { command: '⌘', control: '⌃', option: '⌥', shift: '⇧' };
+  document.querySelectorAll('[data-modifier]').forEach((button) => {
+    button.textContent = labels[button.dataset.modifier];
+  });
+  document.querySelectorAll('[data-shortcut]').forEach((button) => {
+    button.dataset.macShortcut ||= button.dataset.shortcut;
+    button.dataset.macLabel ||= button.textContent;
+    const mapped = shortcutForPlatform(button.dataset.macShortcut, button.dataset.macLabel, payload.platform);
+    button.dataset.shortcut = mapped.shortcut;
+    button.textContent = mapped.label;
+  });
+  if (textSender) textSender.timeoutMs = windows ? 15000 : 6000;
+}
+
 function updateStatus(payload) {
+  updatePlatform(payload);
   const geometryChanged = payload.screen?.width && payload.screen?.height
     && (payload.screen.width !== screenSize.width || payload.screen.height !== screenSize.height);
   if (geometryChanged || payload.capturing === false || (payload.agent && payload.agent.state !== 'ready')) {
@@ -266,8 +299,8 @@ function updateStatus(payload) {
   const screenOk = payload.permissions?.screenRecording === 'ok';
   const accessOk = payload.permissions?.accessibility === 'ok';
   const perms = [];
-  perms.push(screenOk ? '录屏✓' : '录屏待授权');
-  perms.push(accessOk ? '控制✓' : '辅助功能待授权');
+  perms.push(screenOk ? '录屏✓' : targetPlatform.windows ? '采集不可用' : '录屏待授权');
+  perms.push(accessOk ? '控制✓' : targetPlatform.windows ? '输入不可用' : '辅助功能待授权');
   if (payload.capturing === false && screenOk) perms.push('采集重连中');
   permissionLabel.textContent = perms.join(' · ');
   // 移动端顶栏空间宝贵：权限全部正常时隐藏标签，异常时高亮显示并可点击打开授权引导
@@ -1299,7 +1332,7 @@ async function syncImeInput(force = false) {
     if (imeInput.value.startsWith(submitted)) imeInput.value = imeInput.value.slice(submitted.length);
     else {
       imeNeedsExplicitSend = true;
-      imeHint.textContent = '已发送的文字随后被本地编辑。请检查 Mac；输入框内容保留，按回车可另行发送。';
+      imeHint.textContent = '已发送的文字随后被本地编辑。请检查远程电脑；输入框内容保留，按回车可另行发送。';
       return;
     }
   }
@@ -1319,12 +1352,12 @@ async function syncImeInput(force = false) {
     await sendText(current);
     if (imePending !== pending) return;
     pending.accepted = true;
-    imeHint.textContent = '已提交到 Mac 输入服务；可恢复上次文本。需要修改的文字请先在「长文」中编辑。';
+    imeHint.textContent = '已提交到远程输入服务；可恢复上次文本。需要修改的文字请先在「长文」中编辑。';
     if (!composing) syncImeInput();
   } catch (error) {
     if (imePending === pending) imePending = null;
     imeNeedsExplicitSend = true;
-    imeHint.textContent = `${error.message}。文字已保留，请检查 Mac 后再按回车重试。`;
+    imeHint.textContent = `${error.message}。文字已保留，请检查远程电脑 后再按回车重试。`;
   }
 }
 
@@ -1471,7 +1504,7 @@ async function sendBulkFrom(input) {
   refreshControlState();
   try {
     await sendText(text);
-    notify(`已提交 ${Array.from(text).length} 个字符到 Mac 输入服务`);
+    notify(`已提交 ${Array.from(text).length} 个字符到远程输入服务`);
   } catch (error) {
     notify(`${error.message}；原文已保留`);
   } finally {
@@ -1535,7 +1568,7 @@ document.querySelectorAll('[data-restore-text]').forEach((button) => {
       updateKbdBulkCount();
       kbdBulkInput.focus();
     }
-    notify('已恢复上次文本到编辑框；检查 Mac 后可手动发送');
+    notify('已恢复上次文本到编辑框；检查远程电脑后可手动发送');
   });
 });
 
@@ -1667,7 +1700,7 @@ async function copyAccessLink() {
   const link = shareUrl.toString();
   try {
     await navigator.clipboard.writeText(link);
-    notify('已复制连接地址；持有地址的人可控制这台 Mac');
+    notify('已复制连接地址；持有地址的人可控制这台电脑');
   } catch {
     // HTTP LAN origins often have no Clipboard API. Offer selectable text in
     // a deliberate sharing dialog instead of leaking the credential into logs.
@@ -1683,7 +1716,7 @@ $('shareModalClose').addEventListener('click', () => hideModal($('shareModal')))
 accessChangeBtn.addEventListener('click', () => {
   connection.stop();
   connection.authFailed = true;
-  setConnection('auth', '更换连接密钥', '粘贴 Mac 提供的连接地址或密钥。');
+  setConnection('auth', '更换连接密钥', '粘贴远程电脑提供的连接地址或密钥。');
   accessInput.focus();
 });
 accessForm.addEventListener('submit', (event) => {
@@ -1867,7 +1900,7 @@ window.addEventListener('online', () => {
 });
 window.addEventListener('offline', () => {
   connection.stop();
-  setConnection('closed', '网络已断开', '请连接到 Mac 所在的局域网，网络恢复后会自动重连。');
+  setConnection('closed', '网络已断开', '请连接到远程电脑所在的局域网，网络恢复后会自动重连。');
 });
 window.addEventListener('pagehide', () => connection.stop());
 window.addEventListener('beforeunload', () => connection.stop());
